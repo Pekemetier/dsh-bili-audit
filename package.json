@@ -1,7 +1,7 @@
 {
-  "name": "dsh-bili-qq",
-  "version": "2.0.0",
-  "description": "DSH 离线推荐流选择审计插件：从本地视频库与固定轨迹回放 B站推荐卡片和观看内容，只暴露选择视频所需工具，不访问 B站、不收藏、不评论、不投递。",
+  "name": "dsh-bili-audit",
+  "version": "2.1.0",
+  "description": "DSH 离线推荐流选择审计插件：从本地分层视频库与固定轨迹回放 B站推荐卡片和观看内容，只暴露选择视频所需工具；运行时零 B站请求，另附显式限速只读采集脚本。",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -17,6 +17,7 @@
     "client.js",
     "cordis.patch.yml",
     "lib",
+    "scripts",
     "examples",
     "locale",
     "icon.svg",
@@ -48,13 +49,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mswinandmc/dsh-bili-qq.git"
+    "url": "git+https://github.com/Pekemetier/dsh-bili-audit.git"
   },
-  "homepage": "https://github.com/mswinandmc/dsh-bili-qq#readme",
+  "homepage": "https://github.com/Pekemetier/dsh-bili-audit#readme",
   "bugs": {
-    "url": "https://github.com/mswinandmc/dsh-bili-qq/issues"
+    "url": "https://github.com/Pekemetier/dsh-bili-audit/issues"
   },
-  "author": "mswinandmc",
+  "author": "Pekemetier",
   "engines": {
     "node": ">=22"
   },
@@ -65,6 +66,7 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check-manifest.mjs && npm test",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "crawl:bili": "node scripts/crawl-bilibili.mjs"
   }
 }

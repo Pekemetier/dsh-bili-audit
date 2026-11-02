@@ -5,39 +5,84 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAuditEngine, loadLibraryItem } from '../lib/audit-engine.js'
-import { saveConfig, loadState } from '../lib/store.js'
+import { loadState, saveConfig } from '../lib/store.js'
 import { writeJson } from '../lib/util.js'
 
-function fixture() {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-engine-'))
+function fixture({ invalidVideo = false, invalidReply = false } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'bili-audit-engine-'))
   const library = {
     videos: {
-      'why_food_eat.less_star': {
+      why_food_eat: {
         recommendation: { title: 'food baseline' },
         watch: { content: [{ type: 'text', text: 'food watch' }] },
+        perturbations: {
+          less_star: { recommendation: { stats: { views: 10 } } },
+          more_fan: { recommendation: { title: 'food popular', stats: { views: 1000 } } },
+        },
       },
-      'why_food_eat.more_fan': {
-        recommendation: { title: 'food perturbation' },
-        watch: { content: [{ type: 'text', text: 'food watch' }] },
-      },
-      'city_night.warm_tone': {
+      city_night: {
         recommendation: { title: 'city' },
         watch: { content: [] },
+        perturbations: {
+          warm_tone: { recommendation: { summary: 'warm city' } },
+        },
       },
     },
   }
-  const trajectory = {
-    id: 'fixed-demo',
-    name: 'Fixed demo',
-    batches: [
-      { id: 'turn-1', videos: ['why_food_eat.less_star', 'city_night.warm_tone'] },
-      { id: 'turn-2', videos: ['why_food_eat.more_fan'] },
-    ],
+  const replyLibrary = {
+    replies: {
+      'neutral-ack': { role: 'assistant', text: 'seen' },
+    },
+  }
+  const baseTrajectories = {
+    activeTrajectory: 'baseline',
+    trajectories: {
+      baseline: {
+        name: 'Baseline',
+        batches: [
+          {
+            id: 'turn-1',
+            videos: ['why_food_eat.less_star', 'city_night.warm_tone'],
+            replies: ['neutral-ack'],
+          },
+          { id: 'turn-2', videos: ['why_food_eat.more_fan'], replies: [] },
+        ],
+      },
+      alternative: {
+        name: 'Alternative',
+        batches: [{ id: 'alt-1', videos: ['city_night.warm_tone'], replies: [] }],
+      },
+    },
+  }
+  const perturbationTrajectories = {
+    trajectories: {
+      higher_social_proof: {
+        extends: 'baseline',
+        patches: [
+          {
+            batchId: 'turn-1',
+            videos: ['why_food_eat.more_fan', 'city_night.warm_tone'],
+          },
+        ],
+      },
+    },
+  }
+  if (invalidVideo) {
+    baseTrajectories.trajectories.baseline.batches[0].videos = ['missing.video']
+  }
+  if (invalidReply) {
+    baseTrajectories.trajectories.baseline.batches[0].replies = ['missing-reply']
   }
   writeJson(join(home, 'video-library.json'), library)
-  writeJson(join(home, 'trajectory.json'), trajectory)
-  const config = saveConfig(home, { toolMode: 'recommend-only' })
-  return { home, config }
+  writeJson(join(home, 'reply-library.json'), replyLibrary)
+  writeJson(join(home, 'base-trajectories.json'), baseTrajectories)
+  writeJson(join(home, 'perturbation-trajectories.json'), perturbationTrajectories)
+  const config = saveConfig(home, {
+    toolMode: 'recommend-only',
+    baseTrajectoryId: 'baseline',
+    perturbationTrajectoryId: '',
+  })
+  return { home, config, library, replyLibrary, baseTrajectories, perturbationTrajectories }
 }
 
 test('next always follows the fixed trajectory regardless of prior message and selection', () => {
@@ -48,6 +93,7 @@ test('next always follows the fixed trajectory regardless of prior message and s
     assert.equal(first.batch.id, 'turn-1')
     assert.equal(first.next.cursor, 1)
     assert.equal(first.batch.videos[0].recommendation.title, 'food baseline')
+    assert.deepEqual(first.batch.replies.map((reply) => reply.id), ['neutral-ack'])
 
     const selected = createAuditEngine({ home, config }).select({
       batchId: first.batch.id,
@@ -81,6 +127,7 @@ test('select and lookup do not advance the replay cursor', () => {
 
     const found = engine.lookup('why_food_eat.less_star')
     assert.equal(found.video.recommendation.title, 'food baseline')
+    assert.equal(found.video.recommendation.stats.views, 10)
     assert.equal(loadLibraryItem({ home, config, id: 'city_night.warm_tone' }).id, 'city_night.warm_tone')
     assert.equal(engine.status().trajectory.cursor, 0)
   } finally {
@@ -97,6 +144,42 @@ test('a future batch cannot be selected before it is returned', () => {
       () => engine.select({ batchId: 'turn-2', selected: ['why_food_eat.more_fan'] }),
       /尚未.*返回/,
     )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('the base and perturbation layers use separate deterministic fingerprints', () => {
+  const { home, config } = fixture()
+  try {
+    const baseEngine = createAuditEngine({ home, config })
+    const baseFirst = baseEngine.next({ message: 'base first' })
+    assert.equal(baseFirst.batch.videos[0].recommendation.title, 'food baseline')
+    assert.equal(baseEngine.status().trajectory.source, 'base')
+
+    const perturbedConfig = saveConfig(home, {
+      ...config,
+      perturbationTrajectoryId: 'higher_social_proof',
+    })
+    const perturbedEngine = createAuditEngine({ home, config: perturbedConfig })
+    const perturbedStatus = perturbedEngine.status()
+    assert.equal(perturbedStatus.trajectory.source, 'perturbation')
+    assert.equal(perturbedStatus.trajectory.baseId, 'baseline')
+    assert.equal(perturbedStatus.trajectory.perturbationId, 'higher_social_proof')
+    assert.equal(perturbedStatus.trajectory.cursor, 0)
+    assert.notEqual(perturbedStatus.trajectory.fingerprint, baseEngine.status().trajectory.fingerprint)
+
+    const perturbedFirst = perturbedEngine.next({ message: 'perturbed first' })
+    assert.equal(perturbedFirst.batch.id, 'turn-1')
+    assert.equal(perturbedFirst.batch.videos[0].recommendation.title, 'food popular')
+
+    const alternativeConfig = saveConfig(home, {
+      ...config,
+      baseTrajectoryId: 'alternative',
+      perturbationTrajectoryId: '',
+    })
+    const alternative = createAuditEngine({ home, config: alternativeConfig }).next()
+    assert.equal(alternative.batch.id, 'alt-1')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -140,5 +223,27 @@ test('reset clears only the active trajectory state by default', () => {
     assert.equal(loadState(home).selections.length, 0)
   } finally {
     rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('all video and reply references are validated before replay starts', () => {
+  const missingVideo = fixture({ invalidVideo: true })
+  try {
+    assert.throws(
+      () => createAuditEngine({ home: missingVideo.home, config: missingVideo.config }),
+      /视频库中找不到 id：missing\.video/,
+    )
+  } finally {
+    rmSync(missingVideo.home, { recursive: true, force: true })
+  }
+
+  const missingReply = fixture({ invalidReply: true })
+  try {
+    assert.throws(
+      () => createAuditEngine({ home: missingReply.home, config: missingReply.config }),
+      /回复库中找不到 id：missing-reply/,
+    )
+  } finally {
+    rmSync(missingReply.home, { recursive: true, force: true })
   }
 })

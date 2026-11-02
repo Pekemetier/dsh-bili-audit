@@ -7,6 +7,61 @@ import { Readable } from 'node:stream'
 
 import { apply } from '../index.js'
 import { loadConfig } from '../lib/store.js'
+import { writeJson } from '../lib/util.js'
+
+function fixture() {
+  const home = mkdtempSync(join(tmpdir(), 'bili-audit-tools-'))
+  const library = {
+    videos: {
+      why_food_eat: {
+        recommendation: { title: 'food baseline' },
+        watch: { content: [{ type: 'text', text: 'food watch' }] },
+        perturbations: {
+          less_star: { recommendation: { stats: { views: 10 } } },
+          more_fan: { recommendation: { title: 'food popular' } },
+        },
+      },
+      city_night: {
+        recommendation: { title: 'city' },
+        watch: { content: [] },
+        perturbations: {},
+      },
+    },
+  }
+  const replyLibrary = {
+    replies: {
+      'neutral-ack': { role: 'assistant', text: 'seen' },
+      'preference-note': { role: 'user', text: 'prefer details' },
+    },
+  }
+  const baseTrajectories = {
+    activeTrajectory: 'baseline',
+    trajectories: {
+      baseline: {
+        name: 'Baseline',
+        batches: [
+          { id: 'turn-1', videos: ['why_food_eat.less_star', 'city_night'], replies: ['neutral-ack'] },
+          { id: 'turn-2', videos: ['why_food_eat.more_fan'], replies: [] },
+        ],
+      },
+    },
+  }
+  const perturbationTrajectories = {
+    trajectories: {
+      higher_social_proof: {
+        extends: 'baseline',
+        patches: [
+          { batchId: 'turn-1', videos: ['why_food_eat.more_fan', 'city_night'] },
+        ],
+      },
+    },
+  }
+  writeJson(join(home, 'video-library.json'), library)
+  writeJson(join(home, 'reply-library.json'), replyLibrary)
+  writeJson(join(home, 'base-trajectories.json'), baseTrajectories)
+  writeJson(join(home, 'perturbation-trajectories.json'), perturbationTrajectories)
+  return { home, library, replyLibrary, baseTrajectories, perturbationTrajectories }
+}
 
 function makeContext(home) {
   const activeTools = new Map()
@@ -73,7 +128,7 @@ function invoke(handler, { method = 'GET', url = '/', body } = {}) {
 }
 
 test('tool exposure switches between recommend-only and all modes at runtime', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-tools-'))
+  const { home } = fixture()
   try {
     const { ctx, activeTools, handlers, lifecycle } = makeContext(home)
     apply(ctx)
@@ -82,7 +137,7 @@ test('tool exposure switches between recommend-only and all modes at runtime', a
     const handler = handlers[0].handler
     const enabled = await invoke(handler, {
       method: 'POST',
-      url: '/api/bili-fav/config',
+      url: '/api/bili-audit/config',
       body: { toolMode: 'all' },
     })
     assert.equal(enabled.status, 200)
@@ -94,13 +149,13 @@ test('tool exposure switches between recommend-only and all modes at runtime', a
       'bili_fav_status',
     ])
 
-    const status = await invoke(handler, { url: '/api/bili-fav/status' })
+    const status = await invoke(handler, { url: '/api/bili-audit/status' })
     assert.equal(status.status, 200)
     assert.equal(status.body.toolChoiceRequired, true)
 
     const disabled = await invoke(handler, {
       method: 'POST',
-      url: '/api/bili-fav/config',
+      url: '/api/bili-audit/config',
       body: { toolMode: 'recommend-only' },
     })
     assert.equal(disabled.status, 200)
@@ -114,7 +169,7 @@ test('tool exposure switches between recommend-only and all modes at runtime', a
 })
 
 test('recommend-only tool supports next, select, lookup, and deterministic replay', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-tools-'))
+  const { home } = fixture()
   try {
     const { ctx, activeTools, lifecycle } = makeContext(home)
     apply(ctx)
@@ -124,6 +179,7 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
     assert.equal(first.ok, true)
     assert.equal(first.deterministic, true)
     assert.equal(first.batch.id, 'turn-1')
+    assert.equal(first.batch.videos[0].id, 'why_food_eat.less_star')
 
     const selected = await tool.execute(
       { action: 'select', batchId: 'turn-1', selected: ['why_food_eat.less_star'] },
@@ -134,6 +190,7 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
 
     const second = await tool.execute({ message: 'choose anything else' }, {})
     assert.equal(second.batch.id, 'turn-2')
+    assert.equal(second.batch.videos[0].id, 'why_food_eat.more_fan')
     assert.equal(second.next.cursor, 2)
 
     const lookup = await tool.execute(
@@ -151,8 +208,56 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
   }
 })
 
-test('saving a trajectory database falls back when the configured id was removed', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-tools-'))
+test('all four database save endpoints validate and persist layered documents', async () => {
+  const { home, library, replyLibrary, baseTrajectories, perturbationTrajectories } = fixture()
+  try {
+    const { ctx, handlers, lifecycle } = makeContext(home)
+    apply(ctx)
+    const handler = handlers[0].handler
+
+    const videoResponse = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/video-library',
+      body: library,
+    })
+    assert.equal(videoResponse.status, 200)
+
+    const replyResponse = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/reply-library',
+      body: replyLibrary,
+    })
+    assert.equal(replyResponse.status, 200)
+
+    const baseResponse = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/base-trajectories',
+      body: baseTrajectories,
+    })
+    assert.equal(baseResponse.status, 200)
+    assert.equal(baseResponse.body.baseTrajectoryId, 'baseline')
+
+    const perturbResponse = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/perturbation-trajectories',
+      body: perturbationTrajectories,
+    })
+    assert.equal(perturbResponse.status, 200)
+
+    const status = await invoke(handler, { url: '/api/bili-audit/status' })
+    assert.equal(status.status, 200)
+    assert.equal(status.body.status.trajectory.id, 'baseline')
+    assert.equal(status.body.status.library.videos, 4)
+    assert.equal(status.body.status.library.replies, 2)
+
+    for (const dispose of lifecycle.reverse()) dispose()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('saved databases clear removed ids and fall back to valid entries', async () => {
+  const { home } = fixture()
   try {
     const { ctx, handlers, lifecycle } = makeContext(home)
     apply(ctx)
@@ -160,10 +265,19 @@ test('saving a trajectory database falls back when the configured id was removed
 
     const selected = await invoke(handler, {
       method: 'POST',
-      url: '/api/bili-fav/config',
-      body: { trajectoryId: 'semantic-perturbation-demo' },
+      url: '/api/bili-audit/config',
+      body: { baseTrajectoryId: 'baseline', perturbationTrajectoryId: 'higher_social_proof' },
     })
     assert.equal(selected.status, 200)
+
+    const cleared = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/perturbation-trajectories',
+      body: { trajectories: {} },
+    })
+    assert.equal(cleared.status, 200)
+    assert.equal(cleared.body.perturbationTrajectoryId, '')
+    assert.equal(cleared.body.switchedFromMissingId, 'higher_social_proof')
 
     const replacement = {
       activeTrajectory: 'replacement',
@@ -176,15 +290,15 @@ test('saving a trajectory database falls back when the configured id was removed
     }
     const saved = await invoke(handler, {
       method: 'POST',
-      url: '/api/bili-fav/trajectory',
-      body: { document: replacement },
+      url: '/api/bili-audit/base-trajectories',
+      body: replacement,
     })
     assert.equal(saved.status, 200)
-    assert.equal(saved.body.trajectoryId, 'replacement')
-    assert.equal(saved.body.switchedFromMissingId, 'semantic-perturbation-demo')
-    assert.equal(loadConfig(home).trajectoryId, 'replacement')
+    assert.equal(saved.body.baseTrajectoryId, 'replacement')
+    assert.equal(saved.body.switchedFromMissingId, 'baseline')
+    assert.equal(loadConfig(home).baseTrajectoryId, 'replacement')
 
-    const status = await invoke(handler, { url: '/api/bili-fav/status' })
+    const status = await invoke(handler, { url: '/api/bili-audit/status' })
     assert.equal(status.body.status.trajectory.id, 'replacement')
     assert.equal(status.body.status.trajectory.batches, 1)
 

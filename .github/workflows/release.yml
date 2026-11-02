@@ -7,15 +7,15 @@ name: release
 # Publishing uses npm trusted publishing (OIDC) — no NPM_TOKEN secret and no
 # interactive 2FA. The one-time setup is on the npm side:
 #
-#   npmjs.com -> package "dsh-bili-qq" -> Settings -> Trusted Publishers
+#   npmjs.com -> package "dsh-bili-audit" -> Settings -> Trusted Publishers
 #     Publisher:          GitHub Actions
-#     Organization/user:  mswinandmc
-#     Repository:         dsh-bili-qq
+#     Organization/user:  Pekemetier
+#     Repository:         dsh-bili-audit
 #     Workflow name:      release.yml
 #     Environment:        (leave empty)
 #     Allowed actions:    allow npm publish (and/or stage publish)
 #
-# The package.json repository.url must match github.com/mswinandmc/dsh-bili-qq.
+# The package.json repository.url must match github.com/Pekemetier/dsh-bili-audit.
 # Re-running an already-published tag is safe: publish is skipped when the
 # registry already has that version and the GitHub Release step is idempotent.
 on:
@@ -85,7 +85,7 @@ jobs:
         id: published
         shell: bash
         run: |
-          if npm view "dsh-bili-qq@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1; then
+          if npm view "dsh-bili-audit@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1; then
             echo "already on npm — will only create the GitHub Release"
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
@@ -107,7 +107,7 @@ jobs:
             exit 0
           fi
           gh release create "$GITHUB_REF_NAME" \
-            --title "dsh-bili-qq ${GITHUB_REF_NAME#v}" \
+            --title "dsh-bili-audit ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             ${{ steps.channel.outputs.pre == 'true' && '--prerelease' || '' }} \
-            --notes "npm: https://www.npmjs.com/package/dsh-bili-qq/v/${GITHUB_REF_NAME#v} · dist-tag: ${{ steps.channel.outputs.dist }}"
+            --notes "npm: https://www.npmjs.com/package/dsh-bili-audit/v/${GITHUB_REF_NAME#v} · dist-tag: ${{ steps.channel.outputs.dist }}"

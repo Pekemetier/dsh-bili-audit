@@ -9,17 +9,21 @@ import {
   emptyState,
   loadConfig,
   loadState,
+  paths,
   sanitizeConfig,
   saveConfig,
   saveState,
 } from '../lib/store.js'
 
-test('config defaults to the single-tool recommendation mode', () => {
+test('config defaults to the four-layer local audit database', () => {
   assert.deepEqual(sanitizeConfig({}), {
     toolMode: 'recommend-only',
     libraryPath: 'video-library.json',
-    trajectoryPath: 'trajectory.json',
-    trajectoryId: '',
+    replyLibraryPath: 'reply-library.json',
+    baseTrajectoryPath: 'base-trajectories.json',
+    perturbationTrajectoryPath: 'perturbation-trajectories.json',
+    baseTrajectoryId: '',
+    perturbationTrajectoryId: '',
   })
   assert.equal(DEFAULT_CONFIG.toolMode, 'recommend-only')
 })
@@ -28,28 +32,41 @@ test('config sanitization drops unrelated legacy settings and clamps values', ()
   const config = sanitizeConfig({
     toolMode: 'not-a-mode',
     libraryPath: 'x'.repeat(600),
-    trajectoryPath: 'y'.repeat(600),
-    trajectoryId: 'z'.repeat(300),
+    replyLibraryPath: 'r'.repeat(600),
+    baseTrajectoryPath: 'b'.repeat(600),
+    perturbationTrajectoryPath: 'p'.repeat(600),
+    baseTrajectoryId: 'a'.repeat(300),
+    perturbationTrajectoryId: 'z'.repeat(300),
     folderName: 'old favorite folder',
     deliveryMode: 'qq',
     qqInbound: true,
   })
   assert.equal(config.toolMode, 'recommend-only')
   assert.equal(config.libraryPath.length, 500)
-  assert.equal(config.trajectoryPath.length, 500)
-  assert.equal(config.trajectoryId.length, 200)
+  assert.equal(config.replyLibraryPath.length, 500)
+  assert.equal(config.baseTrajectoryPath.length, 500)
+  assert.equal(config.perturbationTrajectoryPath.length, 500)
+  assert.equal(config.baseTrajectoryId.length, 200)
+  assert.equal(config.perturbationTrajectoryId.length, 200)
   assert.equal('folderName' in config, false)
   assert.equal('deliveryMode' in config, false)
   assert.equal('qqInbound' in config, false)
 })
 
 test('config and state round-trip through the plugin home', () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-store-'))
+  const home = mkdtempSync(join(tmpdir(), 'bili-audit-store-'))
   try {
-    const saved = saveConfig(home, { toolMode: 'all', trajectoryId: 'demo' })
+    const saved = saveConfig(home, {
+      toolMode: 'all',
+      baseTrajectoryId: 'baseline',
+      perturbationTrajectoryId: 'higher-social-proof',
+    })
     assert.deepEqual(loadConfig(home), saved)
     assert.equal(saved.toolMode, 'all')
-    assert.equal(saved.trajectoryId, 'demo')
+    assert.equal(saved.baseTrajectoryId, 'baseline')
+    assert.equal(saved.perturbationTrajectoryId, 'higher-social-proof')
+    assert.equal(paths(home).baseTrajectories, join(home, 'base-trajectories.json'))
+    assert.equal(paths(home).perturbationTrajectories, join(home, 'perturbation-trajectories.json'))
 
     const state = emptyState()
     state.cursors.traj_valid123 = 7
@@ -58,7 +75,7 @@ test('config and state round-trip through the plugin home', () => {
       type: 'next',
       at: '2026-01-01T00:00:00.000Z',
       trajectoryKey: 'traj_valid123',
-      trajectoryId: 'demo',
+      trajectoryId: 'higher-social-proof',
       batchId: 'turn-1',
       batchIndex: 0,
       source: 'recommend',
@@ -68,7 +85,7 @@ test('config and state round-trip through the plugin home', () => {
       id: 'selection-1',
       at: '2026-01-01T00:00:01.000Z',
       trajectoryKey: 'traj_valid123',
-      trajectoryId: 'demo',
+      trajectoryId: 'higher-social-proof',
       batchId: 'turn-1',
       batchIndex: 0,
       selected: [{ videoId: 'why_food_eat.less_star', reason: 'clear explanation' }],
@@ -84,7 +101,7 @@ test('config and state round-trip through the plugin home', () => {
 })
 
 test('state loading rejects malformed cursor keys and sanitizes records', () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-store-'))
+  const home = mkdtempSync(join(tmpdir(), 'bili-audit-store-'))
   try {
     saveState(home, {
       version: 999,

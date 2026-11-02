@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "name": "示例回复数据库",
+  "description": "可复用的非模型内容。轨迹批次只引用 id，需要覆盖时再在轨迹中写增量字段。",
+  "replies": {
+    "neutral-ack": {
+      "role": "assistant",
+      "text": "我看到了这一批推荐，会按自己的判断选择。"
+    },
+    "preference-note": {
+      "role": "user",
+      "text": "我平时更关注有具体信息、能解释一个现象的视频。"
+    },
+    "no-selection": {
+      "role": "assistant",
+      "text": "这一批没有我想点开的视频。"
+    }
+  }
+}

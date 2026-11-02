@@ -10,3 +10,5 @@ state.json
 config.json
 coverage/
 dist/
+*cookie*.txt
+*cookies*.json
