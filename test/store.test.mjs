@@ -6,138 +6,128 @@ import { join } from 'node:path'
 
 import {
   DEFAULT_CONFIG,
+  emptyState,
   loadConfig,
   loadState,
-  markSeen,
   sanitizeConfig,
   saveConfig,
   saveState,
-  seenRecently,
 } from '../lib/store.js'
 
-test('defaults use 大肥鱼推荐 and safe limits', () => {
-  const config = sanitizeConfig({})
-  assert.equal(config.folderName, '大肥鱼推荐')
-  assert.equal(config.deliveryMode, 'favorite')
-  assert.equal(config.channelId, '')
-  assert.deepEqual(config.channelOptions, {})
-  assert.equal(config.scan, DEFAULT_CONFIG.scan)
-  assert.equal(config.deepRead, DEFAULT_CONFIG.deepRead)
-  assert.equal(config.count, DEFAULT_CONFIG.count)
-  assert.equal(config.readSubtitles, true)
-  assert.equal(config.replyPrompt, DEFAULT_CONFIG.replyPrompt)
-  assert.equal(config.qqInbound, true)
-  assert.equal(config.autoRun.enabled, false)
-  assert.equal(config.autoRun.time, '20:00')
-  assert.deepEqual(config.autoRun.windows, [{ start: '20:00', end: '20:10', wakes: 1 }])
-  assert.equal(config.autoRun.minGapMin, 60)
-})
-
-test('clamps user values instead of trusting the form', () => {
-  const config = sanitizeConfig({
-    scan: 999,
-    deepRead: 0,
-    count: 99,
-    folderName: 'x'.repeat(30),
-    deliveryMode: 'nope',
-    replyPrompt: 'x'.repeat(5000),
-    channelId: 'x'.repeat(50),
-    channelOptions: { qq: { target: 'y'.repeat(600), scope: 'c2c' } },
-    autoRun: { enabled: true, time: '25:99' },
+test('config defaults to the single-tool recommendation mode', () => {
+  assert.deepEqual(sanitizeConfig({}), {
+    toolMode: 'recommend-only',
+    libraryPath: 'video-library.json',
+    trajectoryPath: 'trajectory.json',
+    trajectoryId: '',
   })
-  assert.equal(config.scan, 30)
-  assert.equal(config.deepRead, 1)
-  assert.equal(config.count, 10)
-  assert.equal(config.folderName.length, 20)
-  assert.equal(config.deliveryMode, 'favorite')
-  assert.equal(config.channelId.length, 40)
-  assert.equal(config.channelOptions.qq.target.length, 500)
-  assert.equal(config.autoRun.enabled, true)
-  assert.equal(config.autoRun.time, '20:00')
+  assert.equal(DEFAULT_CONFIG.toolMode, 'recommend-only')
 })
 
-test('config round-trips through the plugin home', () => {
+test('config sanitization drops unrelated legacy settings and clamps values', () => {
+  const config = sanitizeConfig({
+    toolMode: 'not-a-mode',
+    libraryPath: 'x'.repeat(600),
+    trajectoryPath: 'y'.repeat(600),
+    trajectoryId: 'z'.repeat(300),
+    folderName: 'old favorite folder',
+    deliveryMode: 'qq',
+    qqInbound: true,
+  })
+  assert.equal(config.toolMode, 'recommend-only')
+  assert.equal(config.libraryPath.length, 500)
+  assert.equal(config.trajectoryPath.length, 500)
+  assert.equal(config.trajectoryId.length, 200)
+  assert.equal('folderName' in config, false)
+  assert.equal('deliveryMode' in config, false)
+  assert.equal('qqInbound' in config, false)
+})
+
+test('config and state round-trip through the plugin home', () => {
   const home = mkdtempSync(join(tmpdir(), 'bili-fav-store-'))
   try {
-    const saved = saveConfig(home, {
-      folderName: '测试夹',
-      deliveryMode: 'both',
-      channelId: 'qq',
-      channelOptions: { qq: { target: '测试用户', scope: 'c2c', tool: 'qq_send__test' } },
-      scan: 12,
-      deepRead: 4,
-      count: 2,
-      readSubtitles: false,
-      autoRun: { enabled: true, time: '23:59' },
+    const saved = saveConfig(home, { toolMode: 'all', trajectoryId: 'demo' })
+    assert.deepEqual(loadConfig(home), saved)
+    assert.equal(saved.toolMode, 'all')
+    assert.equal(saved.trajectoryId, 'demo')
+
+    const state = emptyState()
+    state.cursors.traj_valid123 = 7
+    state.events.push({
+      id: 'event-1',
+      type: 'next',
+      at: '2026-01-01T00:00:00.000Z',
+      trajectoryKey: 'traj_valid123',
+      trajectoryId: 'demo',
+      batchId: 'turn-1',
+      batchIndex: 0,
+      source: 'recommend',
+      message: 'audit note',
     })
-    const loaded = loadConfig(home)
-    assert.deepEqual(loaded, saved)
-    assert.equal(loaded.folderName, '测试夹')
-    assert.equal(loaded.deliveryMode, 'both')
-    assert.equal(loaded.channelId, 'qq')
-    assert.equal(loaded.channelOptions.qq.target, '测试用户')
-    assert.equal(loaded.channelOptions.qq.scope, 'c2c')
-    assert.equal(loaded.channelOptions.qq.tool, 'qq_send__test')
-    assert.equal(loaded.autoRun.time, '23:59')
+    state.selections.push({
+      id: 'selection-1',
+      at: '2026-01-01T00:00:01.000Z',
+      trajectoryKey: 'traj_valid123',
+      trajectoryId: 'demo',
+      batchId: 'turn-1',
+      batchIndex: 0,
+      selected: [{ videoId: 'why_food_eat.less_star', reason: 'clear explanation' }],
+    })
+    saveState(home, state)
+    const loaded = loadState(home)
+    assert.equal(loaded.cursors.traj_valid123, 7)
+    assert.equal(loaded.events[0].message, 'audit note')
+    assert.equal(loaded.selections[0].selected[0].videoId, 'why_food_eat.less_star')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('legacy QQ group config migrates to private-only', () => {
-  const config = sanitizeConfig({
-    deliveryMode: 'qq',
-    qqTarget: '旧群',
-    qqScope: 'group',
-    qqTool: 'qq_send__legacy',
-  })
-  assert.equal(config.deliveryMode, 'channel')
-  assert.equal(config.channelId, 'qq')
-  assert.equal(config.channelOptions.qq.target, '')
-  assert.equal(config.channelOptions.qq.targetType, 'c2c')
-  assert.equal(config.channelOptions.qq.scope, 'group')
-  assert.equal(config.channelOptions.qq.tool, 'qq_send__legacy')
-})
-
-test('an explicitly unselected channel stays unconfigured', () => {
-  const unselected = sanitizeConfig({ deliveryMode: 'session', channelId: '' })
-  assert.equal(unselected.channelId, '')
-  const legacy = sanitizeConfig({ deliveryMode: 'session' })
-  assert.equal(legacy.channelId, 'session')
-})
-
-test('QQ targets stay private-only', () => {
-  const config = sanitizeConfig({
-    channelOptions: {
-      qq: { target: 'group|group1', targetType: 'group', targetManual: 'user1' },
-    },
-  })
-  assert.equal(config.channelOptions.qq.target, '')
-  assert.equal(config.channelOptions.qq.targetType, 'c2c')
-  assert.equal(config.channelOptions.qq.targetManual, 'user1')
-
-  const manual = sanitizeConfig({
-    channelOptions: {
-      qq: { target: '__manual__', targetManual: 'group-openid', targetType: 'group' },
-    },
-  })
-  assert.equal(manual.channelOptions.qq.target, '')
-  assert.equal(manual.channelOptions.qq.targetManual, '')
-  assert.equal(manual.channelOptions.qq.targetType, 'c2c')
-})
-
-
-test('seen map persists and expires by timestamp', () => {
-  const home = mkdtempSync(join(tmpdir(), 'bili-fav-seen-'))
+test('state loading rejects malformed cursor keys and sanitizes records', () => {
+  const home = mkdtempSync(join(tmpdir(), 'bili-fav-store-'))
   try {
-    const state = loadState(home)
-    assert.deepEqual(Object.keys(state.seen), [])
-    markSeen(state, 'BV1TEST00000')
-    assert.equal(seenRecently(state, 'BV1TEST00000'), true)
-    assert.equal(seenRecently(state, 'BV1MISSING00'), false)
-    saveState(home, state)
+    saveState(home, {
+      version: 999,
+      cursors: {
+        'bad key!': 3,
+        traj_ok: 4.9,
+        ['traj_' + 'x'.repeat(100)]: 2,
+      },
+      events: [
+        {
+          id: 'e'.repeat(200),
+          type: 'favorite',
+          at: 'a'.repeat(100),
+          trajectoryKey: 'traj_ok',
+          trajectoryId: 't'.repeat(300),
+          batchId: 'b'.repeat(300),
+          batchIndex: -10,
+          source: 's'.repeat(100),
+          message: 'm'.repeat(3000),
+        },
+        null,
+      ],
+      selections: [
+        {
+          id: 's1',
+          selected: [
+            { videoId: 'why_food_eat.less_star', reason: 'r'.repeat(2000) },
+            { reason: 'missing id' },
+            'city_night.warm_tone',
+          ],
+        },
+      ],
+      legacyCredentials: { cookie: 'must not survive' },
+    })
     const loaded = loadState(home)
-    assert.ok(loaded.seen.BV1TEST00000 > 0)
+    assert.deepEqual(loaded.cursors, { traj_ok: 4 })
+    assert.equal(loaded.events.length, 1)
+    assert.equal(loaded.events[0].type, 'next')
+    assert.equal(loaded.events[0].batchIndex, 0)
+    assert.equal(loaded.events[0].message.length, 2000)
+    assert.equal(loaded.selections[0].selected.length, 2)
+    assert.equal(loaded.selections[0].selected[0].reason.length, 1000)
+    assert.equal('legacyCredentials' in loaded, false)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

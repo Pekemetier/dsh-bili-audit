@@ -1,7 +1,7 @@
 {
   "name": "dsh-bili-qq",
-  "version": "1.0.2",
-  "description": "DSH 插件：B站自主刷片 + QQ 官方 Bot。agent 自己刷推荐、读字幕挑片写理由，并通过腾讯 QQ 官方 API 私聊推送；QQ 回复会转回同一会话。",
+  "version": "2.0.0",
+  "description": "DSH 离线推荐流选择审计插件：从本地视频库与固定轨迹回放 B站推荐卡片和观看内容，只暴露选择视频所需工具，不访问 B站、不收藏、不评论、不投递。",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -17,7 +17,7 @@
     "client.js",
     "cordis.patch.yml",
     "lib",
-    "vendor",
+    "examples",
     "locale",
     "icon.svg",
     "README.md",
@@ -42,10 +42,9 @@
     "deepseek-harness",
     "deepseek",
     "bilibili",
-    "b站",
-    "qq",
-    "tencent",
-    "ai"
+    "recommendation-audit",
+    "agent-audit",
+    "offline-replay"
   ],
   "repository": {
     "type": "git",

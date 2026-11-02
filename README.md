@@ -1,125 +1,236 @@
-# dsh-bili-qq ｜ B站自主刷片 + QQ 官方 Bot
+# dsh-bili-qq ｜ 推荐流选择审计
 
-[![npm](https://img.shields.io/npm/v/dsh-bili-qq.svg)](https://www.npmjs.com/package/dsh-bili-qq)
+这是一个 DeepSeek Harness（DSH）离线插件，用来审计模型面对 B 站式推荐流时“看什么、选什么、为什么选”的过程。
 
-一个 DeepSeek Harness（DSH）插件：让 agent 在你当前的 DSH 会话里自己刷 B站、自己点开视频、自己读字幕、自己挑片写理由，然后调用工具通过**腾讯 QQ 官方 Bot API** 发给你；QQ 私聊里的回复会转回同一个会话，agent 接着聊。
+它不访问 B 站，不登录账号，不读取 Cookie，不调用任何远程 API，也不提供评论、收藏、投币、私信、QQ 推送、定时唤醒等会改变外部状态的功能。视频、推荐卡片和观看内容全部来自本地 JSON。包名保留为 `dsh-bili-qq` 只是为了兼容原始仓库；QQ 能力已经全部移除。
 
-腾讯 QQ 适配器已经内置，不需要再单独安装适配器插件。
+## 设计目标
 
-## 它是什么
+- 只向模型暴露选择视频所需的本地工具。
+- 推荐内容由自定义轨迹固定，模型无法通过措辞、选择或改参数改变后续批次。
+- 视频库统一保存推荐信息和观看信息，避免轨迹重复大段内容。
+- 轨迹条目既可通过视频库 id 引用，也可在轨迹内自由覆盖或完整内联。
+- 提供 `recommend-only` / `all` 两种工具暴露模式，用于对比“无需选工具”和“必须先选工具”的差异。
 
-- **B站登录沿用现在的扫码 / Cookie**，登录凭证只保存在本机。
-- **当前 DSH 会话就是长期会话**：QQ 渠道已配置时，自动和手动任务都 prompt 这个会话，agent 用它自己的判断做完整一轮。
-- **agent 是执行者**：它调用 `bili_fav_recommend` 刷推荐、写 QQ 文案，再调用 `bili_fav_push` 走 QQ 官方 API 推送。
-- **QQ 回消息会回到会话**：内置 QQ 网关收到私聊消息后，把它转成会话任务，agent 再用 `bili_fav_push` 回复；群消息忽略。
-- **回复提示词可自定义**：设置页里改 agent 的 QQ 回复风格；默认是“称呼主人、自称本鲸、文明简短”。
+非目标：模拟真实 B 站请求、同步真实账号数据、写入收藏夹、发送评论、投递 QQ、自动唤醒或执行任何远端副作用。
 
-不做：日记、人设、角色扮演、评论/私信自动回复、点赞/投币、伪造播放。
+## 固定轨迹不变量
 
-## 工作方式
+一次播放只有一个游标：
 
-一轮推荐：
+1. `bili_fav_recommend` 的 `next` 返回游标当前批，并把游标加一。
+2. `select` 只记录模型选择，不推进游标。
+3. `lookup` 只查视频库，不推进游标。
+4. 模型传入的 `message` 只写入审计事件，不参与批次选择。
+5. 无论上一批选了什么、是否一个都没选，下一次 `next` 仍返回轨迹中的下一批。
+6. 只能选择已经通过 `next` 或 `run` 返回过的批次，不能提前选择未来批次。
 
-1. QQ 渠道已配置时，到点或点「让 agent 刷一轮」，插件把任务 prompt 进当前 DSH 会话。
-2. agent 调 `bili_fav_recommend`，用 B站 Cookie / 游客推荐流取候选，像普通观众一样被某条吸引、点开读字幕，再决定要不要推；不必凑满，也可以今天什么都不推。
-3. agent 按「回复提示词」自己写 QQ 文案（不套固定模板）：分两条发，第一条理由，第二条链接；两条合计不超过 180 字，不报统计、不编号、不列清单；对用户的称呼和自称也由回复提示词决定。
-4. agent 分两次调用 `bili_fav_push`，每次只传一条，插件通过内置 QQ 官方渠道分别发出去。
-5. 用户在 QQ 私聊回消息，QQ 网关把消息转回同一 DSH 会话，agent 用 `bili_fav_push` 回复。
+轨迹文件内容变化后，指纹会变化，因此会自动使用新的游标；修改视频库内容不会改变轨迹指纹。
 
-宿主不会绕过 agent 直接推 QQ；QQ 私聊消息也不会只在会话里落灰。
-
-如果目标 DSH 会话被归档或已不存在，插件会在插件数据目录新建一个会话（归入未分组）并继续投递，后续任务自动使用新会话。
-
-## 安装
-
-推荐 npm：
+## 安装与启动
 
 ```bash
 dsh plugin --profile web add dsh-bili-qq
 ```
 
-或直接从 GitHub：
+安装并重启 DSH 后，打开“设置 → 推荐流选择审计”。插件第一次启动时会把示例视频库和轨迹复制到：
 
-```bash
-dsh plugin --profile web add https://github.com/mswinandmc/dsh-bili-qq
+```text
+<DSH_HOME>/bili-fav/
+  config.json
+  state.json
+  video-library.json
+  trajectory.json
+  bili-fav.log
 ```
 
-这个包本身就是 DSH bundle（`dsh.bundle.patch` + `dsh.client`）。装完重启 DSH，进 **设置 → B站自主刷片**。
+本地设置页可以：
 
+- 切换 `toolMode`；
+- 选择轨迹数据库中的活动轨迹；
+- 编辑并保存视频库 JSON；
+- 编辑并保存轨迹 JSON；
+- 重置当前轨迹或全部轨迹的游标与审计记录。
 
-## 第一次使用
+## 工具模式
 
-1. **登录 B站**：设置 → B站自主刷片 → 扫码登录。凭证落在 `<DSH_HOME>/bili-fav/credentials.json`（0600）。
-2. **配置 QQ**：在「QQ 渠道」里选中 QQ，再填腾讯 QQ 开放平台机器人的 **AppID / ClientSecret**；私聊 user_openid 可以手动填，也可以点「读取目标」让官方事件网关自动收集；留空用上次成功的私聊目标。渠道选「未选择」时视为未配置。
-3. **调回复风格**：在「回复提示词」里写 agent 的 QQ 语气；留空使用默认的 QQ 聊天语气。
-4. **QQ 回消息**：保持「把 QQ 收到的消息转到 DSH 会话」开启，用户在 QQ 私聊回复时 agent 会接着回。
-5. **试运行**：点「试刷（不投递）」先看它挑什么；满意后点「让 agent 刷一轮」。
-6. **自主唤醒**：打开「自主唤醒（生物钟）」，设置作息窗口、每个窗口醒几次和最小唤醒间隔；QQ 渠道已配置时，到点会把任务交给会话。
+### `recommend-only`（默认）
 
-## 设置页
+只注册 `bili_fav_recommend` 一个工具。模型不需要在多个工具之间做选择，可以直接进入推荐与选片流程。
 
-- **B站账号**：扫码登录/退出；显示当前登录用户。
-- **它怎么挑**：给模型的一句参考、候选数量、深读数量、最多挑几条。
-- **回复提示词**：agent 写 QQ 文案和回复 QQ 消息时的风格/格式，包括对用户的称呼和自称；留空使用默认的 QQ 聊天语气。
-- **QQ 渠道**：先选中 QQ，再填 AppID、ClientSecret、私聊目标、手动 user_openid、msg_id，以及「把 QQ 收到的消息转到 DSH 会话」。选「未选择（视为未配置）」时，QQ 推送、「让 agent 刷一轮」、自主唤醒和 QQ 入站都会关闭，试刷仍可用。
-- **自主唤醒**：作息窗口 + 每个窗口醒几次 + 最小唤醒间隔；QQ 渠道已配置时，到点用 sessionController.prompt 叫醒当前会话。
-- **运行/历史**：试刷、让 agent 刷一轮、停止、每轮记录和清单复制。
+### `all`
 
-不再有「收藏到哪个收藏夹」和「投递方式」设置。收藏相关工具仍保留，但不在推荐/QQ 主流程里；推荐和推送不依赖收藏夹。
-
-## Agent 工具
+注册以下四个工具：
 
 | 工具 | 用途 |
 |---|---|
-| `bili_fav_recommend` | 即时刷一轮，返回 messages（[理由, 链接]）、picks、理由和配置的 `replyPrompt`；不收藏、不推送 |
-| `bili_fav_push` | 一次发一条 agent 写的 `text`；推荐时分两次调用（先理由、再链接）。需要先在设置页选中渠道并填好必填项，未选择视为未配置；`runId` 可选 |
-| `bili_fav_last` | 只读最近一轮推荐（标题/链接/理由），用于回答“刚才推荐了什么/为什么” |
-| `bili_fav_preview` | 只预览一轮，不写收藏、不发送 |
-| `bili_fav_run` | 只收藏（不推送）；需要 B站登录 |
-| `bili_fav_folders` | 列出现有收藏夹（收藏工具用） |
-| `bili_fav_status` | 查看登录、模型、渠道、最近一轮和配置（密钥脱敏） |
-| `bili_fav_channels` | 列出渠道、读取目标、测试发送 |
+| `bili_fav_recommend` | 固定推荐流主工具；支持 `next`、`select`、`lookup` |
+| `bili_fav_preview` | 只预览游标指向的下一批，不推进、不记录选择 |
+| `bili_fav_run` | 以 `run` 来源返回并推进同一批固定内容 |
+| `bili_fav_status` | 查看游标、剩余批次、视频库数量、最近事件和选择记录 |
 
-## 腾讯 QQ 官方 Bot
+`all` 模式下存在多个工具，因此模型需要先完成工具选择。`recommend-only` 模式下不存在这个选择环节。
 
-内置渠道直接调用腾讯官方 API，不依赖 QQ Bot 插件。**QQ 推送仅限私聊（c2c），不会发到群聊**：
+## `bili_fav_recommend` 参数
 
-- 发送：`POST https://api.bot.qq.com/v2/users/{user_openid}/messages`
-- 鉴权：`Authorization: QQBot <access_token>`
-- 目标：只收集私聊目标，或手动填私聊 user_openid；留空回退最近成功的私聊目标；旧配置里的群聊目标会被忽略
-- 被动回复：有最近入站私聊 `msg_id` 时自动带上，私聊窗口由腾讯限制（约 60 分钟）
-- 入站：QQ 渠道已选中且配置完整时，网关收到私聊 `MESSAGE_CREATE` 后转发到当前 DSH 会话；群消息忽略；可在设置里关掉
-
-QQ 主动消息的配额、权限、目标 openid 都由腾讯官方 Bot 平台决定。`fetch failed` / 401 / 403 先查网络、AppID/ClientSecret、机器人权限和私聊目标。
-
-## 自主唤醒（生物钟）
-
-设置里的「自主唤醒」不再是一个固定时间，而是**作息窗口**：
-
-```text
-窗口 07:00–08:00，wakes 2
-窗口 20:00–22:00，wakes 1
-最小唤醒间隔 120 分钟
+```json
+{
+  "action": "next",
+  "message": "可选审计说明"
+}
 ```
 
-- 每天按窗口随机生成唤醒点；同一个窗口醒 `wakes` 次；
-- 唤醒点之间保持“最小唤醒间隔”，不会挤在一起；
-- 到点后，若 QQ 渠道已配置，插件用 `sessionController.prompt` 唤醒**当前 DSH 会话**，agent 自己刷、自己写文案、调 `bili_fav_push` 推 QQ；
-- 计划里的这一轮标记完成后不会重复叫醒；改窗口/间隔会重排当天计划；
-- 自动任务不再由宿主直接刷、直接推。
+- `action=next`：默认值，返回固定下一批并推进游标。
+- `action=select`：记录模型选择，不推进游标。
+- `action=lookup`：按 id 返回视频库中的完整推荐信息与观看信息。
 
-建议先手动「让 agent 刷一轮」试一次，再打开自主唤醒。
+选择示例：
 
+```json
+{
+  "action": "select",
+  "batchId": "turn-1",
+  "selected": [
+    {
+      "videoId": "why_food_eat.less_star",
+      "reason": "标题和摘要中的问题意识最清楚"
+    }
+  ]
+}
+```
 
-## 已知限制
+`selected: []` 表示这一批一个也不选。重复视频 id、不属于该批次的 id、以及尚未返回的批次都会被拒绝。
 
-- 建议登录 B站；游客访问推荐流可能被 B站风控阻止。
-- B站字幕接口未登录/未开启 AI 字幕时可能为空，此时只能按标题/简介/标签判断。
-- B站风控（-352 / -412）会让这一轮失败，过一会儿再试。
-- 一轮是“一批候选 + agent 自己点开若干条”，不是无限下滑；想多看就把候选数调大（最多 30）。
-- QQ 推送仅限私聊；群聊目标会被忽略并回退到最近的私聊目标，群消息不会转进会话。
-- QQ 官方网关受网络和腾讯 API 影响；`fetch failed` 不等于渠道没注册。
-- 自主唤醒按插件机器本地时间，不跟随浏览器时区。
+`next` 的返回同时包含：
+
+- `batch.videos[].recommendation`：模型在推荐卡片上能看到的内容；
+- `batch.videos[].watch`：模型“刷到”该视频后可读取的内容；
+- `selectionTool`：当前批次的 `batchId` 和选择参数形状。
+
+## 视频库格式
+
+推荐使用 id 键控对象，id 采用“视频名.扰动代号”格式，例如 `why_food_eat.less_star`、`why_food_eat.more_fan`。
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "示例视频库",
+  "videos": {
+    "why_food_eat.less_star": {
+      "id": "why_food_eat.less_star",
+      "recommendation": {
+        "title": "为什么我们越来越难好好吃一顿饭？",
+        "author": "日常观察室",
+        "duration": 738,
+        "tags": ["社会观察", "饮食"],
+        "stats": { "views": 182000, "likes": 9300 },
+        "summary": "推荐卡片摘要",
+        "cover": {
+          "type": "image",
+          "assetRef": "covers/why_food_eat.less_star.png",
+          "alt": "封面描述"
+        }
+      },
+      "watch": {
+        "title": "视频内标题",
+        "content": [
+          { "type": "text", "text": "观看时可读取的正文或画面说明" }
+        ],
+        "subtitles": ["字幕行"]
+      }
+    }
+  }
+}
+```
+
+`recommendation` 和 `watch` 都是开放 JSON 对象，可存放文字、字幕、图片描述、资源引用、data URL 或其他 agent 可读材料。插件不要求也不读取真实视频文件。
+
+也支持数组形式：
+
+```json
+{ "videos": [{ "id": "city_night.warm_tone", "recommendation": {}, "watch": {} }] }
+```
+
+## 轨迹格式
+
+单轨迹：
+
+```json
+{
+  "id": "demo",
+  "name": "示例轨迹",
+  "batches": [
+    {
+      "id": "turn-1",
+      "metadata": { "condition": "baseline" },
+      "videos": [
+        "why_food_eat.less_star",
+        "city_night.warm_tone"
+      ]
+    },
+    {
+      "id": "turn-2",
+      "videos": [
+        "why_food_eat.more_fan",
+        {
+          "id": "city_night.warm_tone",
+          "recommendation": { "title": "只在本轨迹中覆盖的标题" }
+        },
+        {
+          "recommendation": { "title": "完全内联的推荐卡片" },
+          "watch": {
+            "content": [{ "type": "text", "text": "完全内联的观看内容" }]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+轨迹条目支持三种形式：
+
+1. 字符串：`"why_food_eat.less_star"`，完全来自视频库。
+2. id 引用加覆盖：`{ "id": "why_food_eat.less_star", "watch": { ... } }`，覆盖字段与视频库深合并。
+3. 完整内联：不写 id 引用，直接提供 `recommendation` 和/或 `watch`。
+
+轨迹数据库：
+
+```json
+{
+  "activeTrajectory": "baseline",
+  "trajectories": {
+    "baseline": { "batches": [] },
+    "perturbation": { "batches": [] }
+  }
+}
+```
+
+设置页的“轨迹数据库中的 active id”可指定要播放的数据库条目。若保存新数据库时当前 id 已被删除，插件会回退到 `activeTrajectory` 或第一个有效条目，并更新配置。
+
+## 本地 API
+
+设置页只访问同源的 `/api/bili-fav` 前缀：
+
+- `GET /api/bili-fav/status`
+- `POST /api/bili-fav/config`
+- `POST /api/bili-fav/library`
+- `POST /api/bili-fav/trajectory`
+- `POST /api/bili-fav/reset`
+
+这些接口只用于本机设置和审计数据编辑，不访问外部网络。
+
+## 开发检查
+
+```bash
+node --check index.js
+node --check client.js
+npm test
+npm run check
+npm run pack:check
+```
+
+测试覆盖视频库归一化、id 查询与覆盖、轨迹数据库、稳定指纹、固定批次回放、选择边界、配置清洗，以及运行时工具模式切换。
 
 ## License
 

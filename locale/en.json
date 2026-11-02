@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Bilibili Autopilot",
-    "description": "Scrolls your Bilibili recommendation feed with your account, lets the model open videos and read their subtitles, then saves what it finds interesting to a favorite folder you choose."
+    "title": "Recommendation Selection Audit",
+    "description": "Replays fixed local recommendation trajectories and exposes only video-selection tools. No Bilibili requests, favorites, comments, or delivery."
   }
 }
