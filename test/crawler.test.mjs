@@ -1,11 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   BiliCrawlError,
   RequestPacer,
   crawlBilibili,
+  readExistingVideos,
+  writeCrawledVideos,
 } from '../scripts/crawl-bilibili.mjs'
+import { readJsonStrict, writeJson } from '../lib/util.js'
+import { videoFilePath } from '../lib/video-library.js'
 
 const WBI_IMG = 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png'
 const WBI_SUB = 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png'
@@ -89,7 +96,7 @@ test('request pacer enforces the 1000ms hard floor and spaces requests', async (
   assert.deepEqual(sleeps, [1000, 1000])
 })
 
-test('crawler writes a sparse video record and never sends cookies to the subtitle CDN', async () => {
+test('crawler returns sparse per-video records and never sends cookies to the subtitle CDN', async () => {
   const calls = []
   const item = feedItem({ bvid: 'BV1xx411c7mD', aid: 100, cid: 200, title: '测试视频' })
   const detail = detailFor(item)
@@ -140,8 +147,10 @@ test('crawler writes a sparse video record and never sends cookies to the subtit
   })
 
   assert.equal(result.added, 1)
-  const record = result.document.videos['video-bv1xx411c7md']
-  assert.ok(record)
+  assert.equal(result.skipped, 0)
+  assert.equal('document' in result, false)
+  const record = result.records[0]
+  assert.equal(record.id, 'video-bv1xx411c7md')
   assert.deepEqual(record.perturbations, {})
   assert.equal(record.recommendation.title, '测试视频')
   assert.deepEqual(record.recommendation.tags, undefined)
@@ -153,7 +162,11 @@ test('crawler writes a sparse video record and never sends cookies to the subtit
   const subtitleCall = calls.find((call) => call.url.includes('aisubtitle.hdslb.com'))
   assert.ok(subtitleCall)
   assert.equal(subtitleCall.options.headers.Cookie, undefined)
-  assert.ok(calls.filter((call) => call.url !== subtitleCall.url).every((call) => call.options.headers.Cookie === 'SESSDATA=secret-cookie'))
+  assert.ok(
+    calls
+      .filter((call) => call.url !== subtitleCall.url)
+      .every((call) => call.options.headers.Cookie === 'SESSDATA=secret-cookie'),
+  )
 })
 
 test('412 and 429 stop immediately without retrying', async () => {
@@ -220,62 +233,110 @@ test('5xx responses are retried at most twice with backoff', async () => {
   assert.ok(sleeps.includes(1600))
 })
 
-test('resume preserves existing perturbations and skips known BVIDs', async () => {
-  const existingDocument = {
-    schemaVersion: 2,
-    name: 'existing',
-    videos: {
-      'video-bvold000001': {
-        id: 'video-bvold000001',
-        bvid: 'BVOLD000001',
-        recommendation: { title: '已有视频' },
-        watch: { content: [] },
-        perturbations: {
-          manual: { recommendation: { title: '人工扰动' } },
-        },
+test('resume skips known BVIDs and writes new videos without altering existing perturbations', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bili-audit-crawl-'))
+  try {
+    const existingRecord = {
+      schemaVersion: 3,
+      id: 'video-bvold000001',
+      bvid: 'BVOLD000001',
+      recommendation: { title: '已有视频' },
+      watch: { content: [] },
+      perturbations: {
+        manual: { recommendation: { title: '人工扰动' } },
       },
-    },
-  }
-  const oldItem = feedItem({ bvid: 'BVOLD000001', aid: 300, cid: 400, title: '已有视频' })
-  const newItem = feedItem({ bvid: 'BVNEW000001', aid: 301, cid: 401, title: '新视频' })
-  const newDetail = detailFor(newItem)
-  const requested = []
-  const fetchImpl = async (input) => {
-    const url = String(input)
-    requested.push(url)
-    if (url.includes('/x/web-interface/nav')) {
-      return jsonResponse({ code: 0, data: { wbi_img: { img_url: WBI_IMG, sub_url: WBI_SUB } } })
     }
-    if (url.includes('/x/web-interface/wbi/index/top/feed/rcmd')) {
-      return jsonResponse({ code: 0, data: { item: [oldItem, newItem] } })
-    }
-    if (url.includes('/x/web-interface/view') && url.includes('BVNEW000001')) {
-      return jsonResponse({ code: 0, data: newDetail })
-    }
-    if (url.includes('/x/tag/archive/tags') && url.includes('BVNEW000001')) {
-      return jsonResponse({ code: 0, data: [{ tag_name: '新标签' }] })
-    }
-    throw new Error(`unexpected mock URL: ${url}`)
-  }
+    writeJson(videoFilePath(directory, existingRecord.id), existingRecord)
+    const existingRecords = readExistingVideos(directory)
+    assert.equal(existingRecords.length, 1)
+    assert.equal(existingRecords[0].id, existingRecord.id)
 
-  const result = await crawlBilibili({
-    fetchImpl,
-    pages: 1,
-    ps: 2,
-    maxVideos: 2,
-    intervalMs: 1000,
-    jitterMs: 0,
-    existingDocument,
-    now: () => 0,
-    sleepImpl: async () => {},
-    random: () => 0,
-    logger: { info() {}, warn() {} },
-  })
+    const oldItem = feedItem({ bvid: 'BVOLD000001', aid: 300, cid: 400, title: '已有视频' })
+    const newItem = feedItem({ bvid: 'BVNEW000001', aid: 301, cid: 401, title: '新视频' })
+    const newDetail = detailFor(newItem)
+    const requested = []
+    const fetchImpl = async (input) => {
+      const url = String(input)
+      requested.push(url)
+      if (url.includes('/x/web-interface/nav')) {
+        return jsonResponse({ code: 0, data: { wbi_img: { img_url: WBI_IMG, sub_url: WBI_SUB } } })
+      }
+      if (url.includes('/x/web-interface/wbi/index/top/feed/rcmd')) {
+        return jsonResponse({ code: 0, data: { item: [oldItem, newItem] } })
+      }
+      if (url.includes('/x/web-interface/view') && url.includes('BVNEW000001')) {
+        return jsonResponse({ code: 0, data: newDetail })
+      }
+      if (url.includes('/x/tag/archive/tags') && url.includes('BVNEW000001')) {
+        return jsonResponse({ code: 0, data: [{ tag_name: '新标签' }] })
+      }
+      throw new Error(`unexpected mock URL: ${url}`)
+    }
 
-  assert.equal(result.added, 1)
-  assert.equal(result.skipped, 1)
-  assert.deepEqual(result.document.videos['video-bvold000001'], existingDocument.videos['video-bvold000001'])
-  assert.deepEqual(result.document.videos['video-bvnew000001'].perturbations, {})
-  assert.equal(requested.some((url) => url.includes('BVOLD000001')), false)
-  assert.equal(requested.some((url) => url.includes('BVNEW000001')), true)
+    const result = await crawlBilibili({
+      fetchImpl,
+      pages: 1,
+      ps: 2,
+      maxVideos: 2,
+      intervalMs: 1000,
+      jitterMs: 0,
+      existingRecords,
+      now: () => 0,
+      sleepImpl: async () => {},
+      random: () => 0,
+      logger: { info() {}, warn() {} },
+    })
+
+    assert.equal(result.added, 1)
+    assert.equal(result.skipped, 1)
+    assert.equal(requested.some((url) => url.includes('BVOLD000001')), false)
+    assert.equal(requested.some((url) => url.includes('BVNEW000001')), true)
+
+    const written = writeCrawledVideos(directory, result.records)
+    assert.equal(written.length, 1)
+    assert.equal(written[0], videoFilePath(directory, 'video-bvnew000001'))
+    assert.ok(existsSync(videoFilePath(directory, 'video-bvnew000001')))
+
+    const preserved = readJsonStrict(videoFilePath(directory, 'video-bvold000001'))
+    assert.deepEqual(preserved.perturbations, existingRecord.perturbations)
+    const added = readJsonStrict(videoFilePath(directory, 'video-bvnew000001'))
+    assert.deepEqual(added.perturbations, {})
+    assert.equal(added.watch.tags[0], '新标签')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('file collisions with a different BVID are rejected even under force', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bili-audit-crawl-'))
+  try {
+    const file = videoFilePath(directory, 'video-bv1collision')
+    writeJson(file, {
+      schemaVersion: 3,
+      id: 'video-bv1collision',
+      bvid: 'BVOCUPIED001',
+      recommendation: { title: 'occupied' },
+      watch: { content: [] },
+      perturbations: { manual: { recommendation: { title: 'keep me' } } },
+    })
+
+    assert.throws(
+      () => writeCrawledVideos(
+        directory,
+        [{
+          schemaVersion: 3,
+          id: 'video-bv1collision',
+          bvid: 'BVNEW001',
+          recommendation: { title: 'collision' },
+          watch: { content: [] },
+          perturbations: {},
+        }],
+        { force: true },
+      ),
+      /文件名冲突/,
+    )
+    assert.equal(readJsonStrict(file).bvid, 'BVOCUPIED001')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

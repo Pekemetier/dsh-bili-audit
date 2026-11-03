@@ -15,26 +15,26 @@ import {
   saveState,
 } from '../lib/store.js'
 
-test('config defaults to the four-layer local audit database', () => {
+test('config defaults to directory-backed videos and trajectories', () => {
   assert.deepEqual(sanitizeConfig({}), {
     toolMode: 'recommend-only',
-    libraryPath: 'video-library.json',
-    replyLibraryPath: 'reply-library.json',
-    baseTrajectoryPath: 'base-trajectories.json',
-    perturbationTrajectoryPath: 'perturbation-trajectories.json',
+    videoDirectory: 'videos',
+    trajectoryDirectory: 'trajectories',
     baseTrajectoryId: '',
     perturbationTrajectoryId: '',
   })
   assert.equal(DEFAULT_CONFIG.toolMode, 'recommend-only')
 })
 
-test('config sanitization drops unrelated legacy settings and clamps values', () => {
+test('config sanitization drops old aggregate database paths and unrelated settings', () => {
   const config = sanitizeConfig({
     toolMode: 'not-a-mode',
-    libraryPath: 'x'.repeat(600),
-    replyLibraryPath: 'r'.repeat(600),
-    baseTrajectoryPath: 'b'.repeat(600),
-    perturbationTrajectoryPath: 'p'.repeat(600),
+    libraryPath: 'old.json',
+    replyLibraryPath: 'replies.json',
+    baseTrajectoryPath: 'base.json',
+    perturbationTrajectoryPath: 'perturb.json',
+    videoDirectory: 'v'.repeat(600),
+    trajectoryDirectory: 't'.repeat(600),
     baseTrajectoryId: 'a'.repeat(300),
     perturbationTrajectoryId: 'z'.repeat(300),
     folderName: 'old favorite folder',
@@ -42,15 +42,21 @@ test('config sanitization drops unrelated legacy settings and clamps values', ()
     qqInbound: true,
   })
   assert.equal(config.toolMode, 'recommend-only')
-  assert.equal(config.libraryPath.length, 500)
-  assert.equal(config.replyLibraryPath.length, 500)
-  assert.equal(config.baseTrajectoryPath.length, 500)
-  assert.equal(config.perturbationTrajectoryPath.length, 500)
+  assert.equal(config.videoDirectory.length, 500)
+  assert.equal(config.trajectoryDirectory.length, 500)
   assert.equal(config.baseTrajectoryId.length, 200)
   assert.equal(config.perturbationTrajectoryId.length, 200)
-  assert.equal('folderName' in config, false)
-  assert.equal('deliveryMode' in config, false)
-  assert.equal('qqInbound' in config, false)
+  for (const key of [
+    'libraryPath',
+    'replyLibraryPath',
+    'baseTrajectoryPath',
+    'perturbationTrajectoryPath',
+    'folderName',
+    'deliveryMode',
+    'qqInbound',
+  ]) {
+    assert.equal(key in config, false)
+  }
 })
 
 test('config and state round-trip through the plugin home', () => {
@@ -65,10 +71,11 @@ test('config and state round-trip through the plugin home', () => {
     assert.equal(saved.toolMode, 'all')
     assert.equal(saved.baseTrajectoryId, 'baseline')
     assert.equal(saved.perturbationTrajectoryId, 'higher-social-proof')
-    assert.equal(paths(home).baseTrajectories, join(home, 'base-trajectories.json'))
-    assert.equal(paths(home).perturbationTrajectories, join(home, 'perturbation-trajectories.json'))
+    assert.equal(paths(home).videos, join(home, 'videos'))
+    assert.equal(paths(home).trajectories, join(home, 'trajectories'))
 
     const state = emptyState()
+    assert.equal(state.version, 4)
     state.cursors.traj_valid123 = 7
     state.events.push({
       id: 'event-1',
@@ -100,7 +107,7 @@ test('config and state round-trip through the plugin home', () => {
   }
 })
 
-test('state loading rejects malformed cursor keys and sanitizes records', () => {
+test('state loading rejects malformed keys and sanitizes records', () => {
   const home = mkdtempSync(join(tmpdir(), 'bili-audit-store-'))
   try {
     saveState(home, {

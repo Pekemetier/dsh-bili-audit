@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -11,56 +11,59 @@ import { writeJson } from '../lib/util.js'
 
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), 'bili-audit-tools-'))
-  const library = {
-    videos: {
-      why_food_eat: {
-        recommendation: { title: 'food baseline' },
-        watch: { content: [{ type: 'text', text: 'food watch' }] },
-        perturbations: {
-          less_star: { recommendation: { stats: { views: 10 } } },
-          more_fan: { recommendation: { title: 'food popular' } },
-        },
-      },
-      city_night: {
-        recommendation: { title: 'city' },
-        watch: { content: [] },
-        perturbations: {},
-      },
+  const videoDirectory = join(home, 'videos')
+  const baselineDirectory = join(home, 'trajectories', 'baseline')
+  mkdirSync(videoDirectory, { recursive: true })
+  mkdirSync(baselineDirectory, { recursive: true })
+
+  writeJson(join(videoDirectory, 'why_food_eat.json'), {
+    schemaVersion: 3,
+    id: 'why_food_eat',
+    recommendation: { title: 'food baseline' },
+    watch: { content: [{ type: 'text', text: 'food watch' }] },
+    perturbations: {
+      less_star: { recommendation: { stats: { views: 10 } } },
+      more_fan: { recommendation: { title: 'food popular' } },
     },
-  }
-  const replyLibrary = {
-    replies: {
-      'neutral-ack': { role: 'assistant', text: 'seen' },
-      'preference-note': { role: 'user', text: 'prefer details' },
+  })
+  writeJson(join(videoDirectory, 'city_night.json'), {
+    schemaVersion: 3,
+    id: 'city_night',
+    recommendation: { title: 'city' },
+    watch: { content: [] },
+    perturbations: {
+      warm_tone: { recommendation: { summary: 'warm city' } },
     },
-  }
-  const baseTrajectories = {
-    activeTrajectory: 'baseline',
-    trajectories: {
-      baseline: {
-        name: 'Baseline',
-        batches: [
-          { id: 'turn-1', videos: ['why_food_eat.less_star', 'city_night'], replies: ['neutral-ack'] },
-          { id: 'turn-2', videos: ['why_food_eat.more_fan'], replies: [] },
-        ],
+  })
+
+  const base = {
+    schemaVersion: 3,
+    id: 'baseline',
+    name: 'Baseline',
+    batches: [
+      {
+        id: 'turn-1',
+        videos: ['why_food_eat.less_star', 'city_night.warm_tone'],
+        replies: [{ id: 'neutral-ack', role: 'assistant', text: 'seen inline' }],
       },
-    },
+      { id: 'turn-2', videos: ['why_food_eat.more_fan'], replies: [] },
+    ],
   }
-  const perturbationTrajectories = {
-    trajectories: {
-      higher_social_proof: {
-        extends: 'baseline',
-        patches: [
-          { batchId: 'turn-1', videos: ['why_food_eat.more_fan', 'city_night'] },
-        ],
+  const perturbation = {
+    schemaVersion: 3,
+    id: 'higher-social-proof',
+    extends: 'baseline',
+    name: 'Higher social proof',
+    patches: [
+      {
+        batchId: 'turn-1',
+        videos: ['why_food_eat.more_fan', 'city_night.warm_tone'],
       },
-    },
+    ],
   }
-  writeJson(join(home, 'video-library.json'), library)
-  writeJson(join(home, 'reply-library.json'), replyLibrary)
-  writeJson(join(home, 'base-trajectories.json'), baseTrajectories)
-  writeJson(join(home, 'perturbation-trajectories.json'), perturbationTrajectories)
-  return { home, library, replyLibrary, baseTrajectories, perturbationTrajectories }
+  writeJson(join(baselineDirectory, 'base.json'), base)
+  writeJson(join(baselineDirectory, 'higher-social-proof.json'), perturbation)
+  return { home, base, perturbation }
 }
 
 function makeContext(home) {
@@ -127,6 +130,10 @@ function invoke(handler, { method = 'GET', url = '/', body } = {}) {
   })
 }
 
+function disposeAll(lifecycle) {
+  for (const dispose of lifecycle.reverse()) dispose()
+}
+
 test('tool exposure switches between recommend-only and all modes at runtime', async () => {
   const { home } = fixture()
   try {
@@ -152,6 +159,7 @@ test('tool exposure switches between recommend-only and all modes at runtime', a
     const status = await invoke(handler, { url: '/api/bili-audit/status' })
     assert.equal(status.status, 200)
     assert.equal(status.body.toolChoiceRequired, true)
+    assert.equal(status.body.status.trajectory.id, 'baseline')
 
     const disabled = await invoke(handler, {
       method: 'POST',
@@ -162,7 +170,15 @@ test('tool exposure switches between recommend-only and all modes at runtime', a
     assert.deepEqual([...activeTools.keys()], ['bili_fav_recommend'])
     assert.equal(loadConfig(home).toolMode, 'recommend-only')
 
-    for (const dispose of lifecycle.reverse()) dispose()
+    const badConfig = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/config',
+      body: { perturbationTrajectoryId: 'missing-perturbation' },
+    })
+    assert.equal(badConfig.status, 500)
+    assert.equal(loadConfig(home).perturbationTrajectoryId, '')
+
+    disposeAll(lifecycle)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -180,6 +196,8 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
     assert.equal(first.deterministic, true)
     assert.equal(first.batch.id, 'turn-1')
     assert.equal(first.batch.videos[0].id, 'why_food_eat.less_star')
+    assert.equal(first.batch.videos[0].recommendation.stats.views, 10)
+    assert.deepEqual(first.batch.replies.map((reply) => reply.id), ['neutral-ack'])
 
     const selected = await tool.execute(
       { action: 'select', batchId: 'turn-1', selected: ['why_food_eat.less_star'] },
@@ -187,6 +205,7 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
     )
     assert.equal(selected.ok, true)
     assert.equal(selected.cursor, 1)
+    assert.deepEqual(selected.selected, [{ videoId: 'why_food_eat.less_star', reason: '' }])
 
     const second = await tool.execute({ message: 'choose anything else' }, {})
     assert.equal(second.batch.id, 'turn-2')
@@ -202,107 +221,202 @@ test('recommend-only tool supports next, select, lookup, and deterministic repla
     assert.ok(lookup.video.recommendation)
     assert.ok(lookup.video.watch)
 
-    for (const dispose of lifecycle.reverse()) dispose()
+    disposeAll(lifecycle)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('all four database save endpoints validate and persist layered documents', async () => {
-  const { home, library, replyLibrary, baseTrajectories, perturbationTrajectories } = fixture()
-  try {
-    const { ctx, handlers, lifecycle } = makeContext(home)
-    apply(ctx)
-    const handler = handlers[0].handler
-
-    const videoResponse = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/video-library',
-      body: library,
-    })
-    assert.equal(videoResponse.status, 200)
-
-    const replyResponse = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/reply-library',
-      body: replyLibrary,
-    })
-    assert.equal(replyResponse.status, 200)
-
-    const baseResponse = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/base-trajectories',
-      body: baseTrajectories,
-    })
-    assert.equal(baseResponse.status, 200)
-    assert.equal(baseResponse.body.baseTrajectoryId, 'baseline')
-
-    const perturbResponse = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/perturbation-trajectories',
-      body: perturbationTrajectories,
-    })
-    assert.equal(perturbResponse.status, 200)
-
-    const status = await invoke(handler, { url: '/api/bili-audit/status' })
-    assert.equal(status.status, 200)
-    assert.equal(status.body.status.trajectory.id, 'baseline')
-    assert.equal(status.body.status.library.videos, 4)
-    assert.equal(status.body.status.library.replies, 2)
-
-    for (const dispose of lifecycle.reverse()) dispose()
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
-test('saved databases clear removed ids and fall back to valid entries', async () => {
+test('per-file API reads and writes videos, base trajectories, and perturbation trajectories', async () => {
   const { home } = fixture()
   try {
     const { ctx, handlers, lifecycle } = makeContext(home)
     apply(ctx)
     const handler = handlers[0].handler
 
-    const selected = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/config',
-      body: { baseTrajectoryId: 'baseline', perturbationTrajectoryId: 'higher_social_proof' },
-    })
-    assert.equal(selected.status, 200)
+    const videos = await invoke(handler, { url: '/api/bili-audit/videos' })
+    assert.equal(videos.status, 200)
+    assert.deepEqual(videos.body.videos.map((entry) => entry.id), ['city_night', 'why_food_eat'])
 
-    const cleared = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/perturbation-trajectories',
-      body: { trajectories: {} },
-    })
-    assert.equal(cleared.status, 200)
-    assert.equal(cleared.body.perturbationTrajectoryId, '')
-    assert.equal(cleared.body.switchedFromMissingId, 'higher_social_proof')
+    const video = await invoke(handler, { url: '/api/bili-audit/video?id=why_food_eat' })
+    assert.equal(video.status, 200)
+    assert.equal(video.body.document.id, 'why_food_eat')
+    assert.equal(video.body.document.perturbations.less_star.recommendation.stats.views, 10)
 
-    const replacement = {
-      activeTrajectory: 'replacement',
-      trajectories: {
-        replacement: {
-          name: 'Replacement',
-          batches: [{ id: 'only-batch', videos: ['why_food_eat.less_star'] }],
+    const addedVideo = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/video',
+      body: {
+        id: 'repair_culture',
+        document: {
+          id: 'repair_culture',
+          recommendation: { title: 'repair' },
+          watch: { content: [{ type: 'text', text: 'repair watch' }] },
+          perturbations: { long_intro: { recommendation: { title: 'long repair' } } },
         },
       },
-    }
-    const saved = await invoke(handler, {
-      method: 'POST',
-      url: '/api/bili-audit/base-trajectories',
-      body: replacement,
     })
-    assert.equal(saved.status, 200)
-    assert.equal(saved.body.baseTrajectoryId, 'replacement')
-    assert.equal(saved.body.switchedFromMissingId, 'baseline')
-    assert.equal(loadConfig(home).baseTrajectoryId, 'replacement')
+    assert.equal(addedVideo.status, 200)
+    assert.ok(existsSync(join(home, 'videos', 'repair_culture.json')))
+
+    const catalog = await invoke(handler, { url: '/api/bili-audit/trajectories' })
+    assert.equal(catalog.status, 200)
+    assert.equal(catalog.body.trajectories[0].baseId, 'baseline')
+    assert.deepEqual(catalog.body.trajectories[0].perturbationIds, ['higher-social-proof'])
+
+    const base = await invoke(handler, {
+      url: '/api/bili-audit/trajectory?baseId=baseline&mode=base',
+    })
+    assert.equal(base.status, 200)
+    assert.equal(base.body.document.batches.length, 2)
+
+    const perturbed = await invoke(handler, {
+      url: '/api/bili-audit/trajectory?baseId=baseline&mode=perturbation&id=higher-social-proof',
+    })
+    assert.equal(perturbed.status, 200)
+    assert.equal(perturbed.body.document.extends, 'baseline')
+
+    const savedBase = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/base-trajectory',
+      body: {
+        baseId: 'baseline',
+        document: {
+          id: 'baseline',
+          name: 'Baseline edited',
+          batches: [
+            {
+              id: 'turn-1',
+              videos: ['why_food_eat.less_star', 'city_night.warm_tone'],
+              replies: [{ id: 'inline-only', role: 'assistant', text: 'context-dependent reply' }],
+            },
+          ],
+        },
+      },
+    })
+    assert.equal(savedBase.status, 200)
+
+    const savedPerturbation = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/perturbation-trajectory',
+      body: {
+        baseId: 'baseline',
+        id: 'higher-social-proof',
+        document: {
+          id: 'higher-social-proof',
+          extends: 'baseline',
+          patches: [
+            {
+              batchId: 'turn-1',
+              videos: ['why_food_eat.more_fan', 'city_night.warm_tone'],
+            },
+          ],
+        },
+      },
+    })
+    assert.equal(savedPerturbation.status, 200)
 
     const status = await invoke(handler, { url: '/api/bili-audit/status' })
-    assert.equal(status.body.status.trajectory.id, 'replacement')
-    assert.equal(status.body.status.trajectory.batches, 1)
+    assert.equal(status.status, 200)
+    assert.equal(status.body.status.library.baseVideos, 3)
+    assert.equal(status.body.status.library.videos, 7)
+    assert.equal(status.body.status.library.perturbations, 4)
+    assert.equal(status.body.status.trajectory.inlineReplies, 1)
 
-    for (const dispose of lifecycle.reverse()) dispose()
+    disposeAll(lifecycle)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('failed per-file saves restore the previous bytes and keep the active audit loadable', async () => {
+  const { home } = fixture()
+  try {
+    const { ctx, handlers, lifecycle } = makeContext(home)
+    apply(ctx)
+    const handler = handlers[0].handler
+    const videoFile = join(home, 'videos', 'why_food_eat.json')
+    const baseFile = join(home, 'trajectories', 'baseline', 'base.json')
+    const originalVideo = readFileSync(videoFile, 'utf8')
+    const originalBase = readFileSync(baseFile, 'utf8')
+
+    const brokenVideo = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/video',
+      body: {
+        id: 'why_food_eat',
+        document: {
+          id: 'why_food_eat',
+          recommendation: { title: 'without perturbations' },
+          watch: { content: [] },
+          perturbations: {},
+        },
+      },
+    })
+    assert.equal(brokenVideo.status, 500)
+    assert.equal(readFileSync(videoFile, 'utf8'), originalVideo)
+
+    const brokenBase = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/base-trajectory',
+      body: {
+        baseId: 'baseline',
+        document: {
+          id: 'baseline',
+          batches: [{ id: 'turn-1', videos: ['missing.video'], replies: [] }],
+        },
+      },
+    })
+    assert.equal(brokenBase.status, 500)
+    assert.equal(readFileSync(baseFile, 'utf8'), originalBase)
+
+    const status = await invoke(handler, { url: '/api/bili-audit/status' })
+    assert.equal(status.status, 200)
+    assert.equal(status.body.status.trajectory.batches, 2)
+
+    disposeAll(lifecycle)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('switching to a perturbation keeps one fixed cursor and inherited reply context', async () => {
+  const { home } = fixture()
+  try {
+    const { ctx, activeTools, handlers, lifecycle } = makeContext(home)
+    apply(ctx)
+    const handler = handlers[0].handler
+
+    const configured = await invoke(handler, {
+      method: 'POST',
+      url: '/api/bili-audit/config',
+      body: {
+        toolMode: 'all',
+        baseTrajectoryId: 'baseline',
+        perturbationTrajectoryId: 'higher-social-proof',
+      },
+    })
+    assert.equal(configured.status, 200)
+
+    const preview = await activeTools.get('bili_fav_preview').execute({}, {})
+    assert.equal(preview.batch.videos[0].id, 'why_food_eat.more_fan')
+    assert.equal(preview.batch.replies[0].id, 'neutral-ack')
+    assert.equal((await activeTools.get('bili_fav_status').execute({}, {})).trajectory.cursor, 0)
+
+    const run = await activeTools.get('bili_fav_run').execute({ message: 'audit only' }, {})
+    assert.equal(run.batch.id, 'turn-1')
+    assert.equal(run.next.cursor, 1)
+
+    const second = await activeTools.get('bili_fav_recommend').execute({}, {})
+    assert.equal(second.batch.id, 'turn-2')
+    assert.equal(second.next.cursor, 2)
+
+    const state = await invoke(handler, { url: '/api/bili-audit/status' })
+    assert.equal(state.body.status.trajectory.source, 'perturbation')
+    assert.equal(state.body.status.trajectory.id, 'higher-social-proof')
+    assert.equal(state.body.status.trajectory.inlineReplies, 1)
+
+    disposeAll(lifecycle)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

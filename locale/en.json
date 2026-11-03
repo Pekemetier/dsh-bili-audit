@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Recommendation Selection Audit",
-    "description": "Replays layered local recommendation trajectories and exposes only video-selection tools. Runtime Bilibili requests, favorites, comments, and delivery are removed; an explicit rate-limited read-only crawler is separate."
+    "description": "Replays split local video files, base trajectories, and sparse perturbation trajectories while exposing only video-selection tools. Runtime Bilibili requests, favorites, comments, and delivery are removed; an explicit rate-limited read-only crawler is separate."
   }
 }

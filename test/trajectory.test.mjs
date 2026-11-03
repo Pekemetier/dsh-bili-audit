@@ -1,16 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { normalizeReplyLibrary } from '../lib/reply-library.js'
-import { normalizeVideoLibrary } from '../lib/video-library.js'
 import {
-  listTrajectoryIds,
+  listTrajectoryCatalog,
+  loadTrajectorySelection,
+  normalizeBaseTrajectoryFile,
+  normalizePerturbationTrajectoryFile,
   resolveBatch,
   resolveLayeredTrajectory,
   selectTrajectory,
   trajectoryFingerprint,
   validateBatchSelection,
 } from '../lib/trajectory.js'
+import { normalizeVideoLibrary } from '../lib/video-library.js'
+import { writeJson } from '../lib/util.js'
 
 const library = normalizeVideoLibrary({
   videos: {
@@ -18,151 +24,143 @@ const library = normalizeVideoLibrary({
       recommendation: { title: 'food original' },
       watch: { content: [{ type: 'text', text: 'food watch' }] },
       perturbations: {
-        less_star: { recommendation: { stats: { views: 10 } } },
-        more_fan: { recommendation: { stats: { views: 1000 } } },
+        less_star: { recommendation: { stats: { views: 3 } } },
+        more_fan: { recommendation: { title: 'food popular', stats: { views: 1000 } } },
       },
     },
     city_night: {
-      recommendation: { title: 'city original' },
+      recommendation: { title: 'city' },
       watch: { content: [] },
       perturbations: {
-        warm_tone: { recommendation: { title: 'warm city' } },
+        warm_tone: { recommendation: { summary: 'warm city' } },
       },
     },
   },
 })
 
-const replies = normalizeReplyLibrary({
-  replies: {
-    'neutral-ack': { role: 'assistant', text: 'seen' },
-    'preference-note': { role: 'user', text: 'prefer details' },
-  },
-})
-
-const baseDatabase = {
-  activeTrajectory: 'baseline',
-  trajectories: {
-    baseline: {
-      name: 'Baseline',
-      metadata: { experiment: 'audit' },
-      batches: [
-        {
-          id: 'turn-1',
-          metadata: { condition: 'base' },
-          videos: ['why_food_eat.less_star', 'city_night.warm_tone'],
-          replies: ['neutral-ack'],
-        },
-        {
-          id: 'turn-2',
-          videos: [{ id: 'city_night.warm_tone', recommendation: { title: 'city override' } }],
-          replies: ['neutral-ack', { replyId: 'preference-note', text: 'local override' }],
-        },
-        { id: 'turn-3', videos: ['why_food_eat.more_fan'] },
-      ],
+const baseDocument = {
+  schemaVersion: 3,
+  id: 'baseline',
+  name: 'Baseline',
+  metadata: { experiment: 'audit' },
+  batches: [
+    {
+      id: 'turn-1',
+      metadata: { condition: 'baseline' },
+      videos: ['why_food_eat.less_star', 'city_night.warm_tone'],
+      replies: [{ id: 'neutral-ack', role: 'assistant', text: 'seen' }],
     },
-  },
+    {
+      id: 'turn-2',
+      videos: [{ id: 'why_food_eat.more_fan', recommendation: { title: 'override' } }],
+      replies: [{ id: 'preference-note', role: 'user', text: 'prefer details' }],
+    },
+    { id: 'turn-3', videos: ['city_night'], replies: [] },
+  ],
 }
 
-const perturbationDatabase = {
-  trajectories: {
-    higher_social_proof: {
-      name: 'Higher social proof',
-      extends: 'baseline',
-      metadata: { condition: 'perturbed' },
-      patches: [
-        {
-          batchId: 'turn-1',
-          videos: ['why_food_eat.more_fan', 'city_night.warm_tone'],
-          metadata: { condition: 'higher-social-proof' },
-        },
-        { batchId: 'turn-2', remove: true },
-      ],
-      addBatches: [{ id: 'turn-4', videos: ['why_food_eat.less_star'] }],
+const perturbationDocument = {
+  schemaVersion: 3,
+  id: 'higher-social-proof',
+  extends: 'baseline',
+  metadata: { condition: 'perturbed' },
+  patches: [
+    {
+      batchId: 'turn-1',
+      videos: ['why_food_eat.more_fan', 'city_night.warm_tone'],
+      metadata: { condition: 'higher-social-proof' },
+      replies: [{ id: 'inline-perturbed', role: 'assistant', text: 'context-specific reply' }],
     },
-  },
+    {
+      batchId: 'turn-2',
+      remove: true,
+    },
+  ],
+  addBatches: [
+    {
+      id: 'turn-4',
+      videos: ['why_food_eat.less_star'],
+      replies: ['新批次的内联回复'],
+    },
+  ],
 }
 
-test('lists and selects trajectories from a database', () => {
-  assert.deepEqual(listTrajectoryIds(baseDatabase), ['baseline'])
-  assert.equal(selectTrajectory(baseDatabase).id, 'baseline')
-  assert.throws(() => selectTrajectory(baseDatabase, 'missing'), /找不到 id/)
-})
-
-test('accepts a single trajectory and array shorthand batches', () => {
-  const trajectory = selectTrajectory({
-    id: 'single',
-    name: 'Single trajectory',
-    batches: [['why_food_eat.less_star'], { id: 'custom', videos: ['city_night.warm_tone'] }],
-  })
-  assert.equal(trajectory.id, 'single')
-  assert.equal(trajectory.batches[0].id, 'batch-1')
-  assert.equal(trajectory.batches[1].id, 'custom')
-  assert.deepEqual(listTrajectoryIds({ batches: [] }), ['default'])
-})
-
-test('resolves video ids, local overrides, inline videos, and reusable replies', () => {
-  const trajectory = selectTrajectory({
-    id: 'mixed',
-    batches: [
-      {
-        id: 'mixed-batch',
-        videos: [
-          'why_food_eat.less_star',
-          { id: 'city_night.warm_tone', recommendation: { title: 'city override' } },
-          { recommendation: { title: 'inline only' }, watch: { subtitles: ['inline subtitle'] } },
-        ],
-        replies: ['neutral-ack', { replyId: 'preference-note', text: 'more specific' }],
-      },
-    ],
-  })
-  const batch = resolveBatch(library, trajectory, 0, replies)
-  assert.equal(batch.id, 'mixed-batch')
+test('batch replies are normalized inline and resolved with video content', () => {
+  const trajectory = selectTrajectory(baseDocument)
+  const batch = resolveBatch(library, trajectory, 0)
+  assert.equal(batch.id, 'turn-1')
   assert.equal(batch.videos[0].recommendation.title, 'food original')
-  assert.equal(batch.videos[1].recommendation.title, 'city override')
-  assert.equal(batch.videos[2].id, 'inline-mixed-batch-3')
-  assert.equal(batch.videos[2].watch.subtitles[0], 'inline subtitle')
-  assert.equal(batch.replies[0].text, 'seen')
-  assert.deepEqual(batch.replies[1], {
-    id: 'preference-note',
-    role: 'user',
-    text: 'more specific',
-  })
-  assert.equal(resolveBatch(library, trajectory, 1), null)
+  assert.deepEqual(batch.videos[0].recommendation.stats, { views: 3 })
+  assert.equal(batch.videos[1].recommendation.summary, 'warm city')
+  assert.deepEqual(batch.replies, [{ id: 'neutral-ack', role: 'assistant', text: 'seen' }])
+  assert.equal(resolveBatch(library, trajectory, 9), null)
 })
 
-test('perturbation trajectories inherit base batches and apply only sparse changes', () => {
-  const base = resolveLayeredTrajectory({ baseDocument: baseDatabase })
+test('perturbation trajectories inherit base batches and store only changes', () => {
+  const base = resolveLayeredTrajectory({ baseDocument, baseTrajectoryId: 'baseline' })
   const perturbed = resolveLayeredTrajectory({
-    baseDocument: baseDatabase,
-    perturbationDocument: perturbationDatabase,
-    perturbationTrajectoryId: 'higher_social_proof',
+    baseDocument,
+    perturbationDocument,
+    baseTrajectoryId: 'baseline',
+    perturbationTrajectoryId: 'higher-social-proof',
   })
   assert.equal(base.source, 'base')
   assert.equal(base.batches.length, 3)
   assert.equal(perturbed.source, 'perturbation')
   assert.equal(perturbed.baseId, 'baseline')
-  assert.equal(perturbed.perturbationId, 'higher_social_proof')
+  assert.equal(perturbed.perturbationId, 'higher-social-proof')
   assert.deepEqual(perturbed.batches.map((batch) => batch.id), ['turn-1', 'turn-3', 'turn-4'])
   assert.deepEqual(perturbed.batches[0].videos, ['why_food_eat.more_fan', 'city_night.warm_tone'])
   assert.deepEqual(perturbed.batches[0].metadata, { condition: 'higher-social-proof' })
-  assert.deepEqual(perturbed.batches[0].replies, ['neutral-ack'])
-  assert.deepEqual(perturbed.batches[1].videos, ['why_food_eat.more_fan'])
-  assert.deepEqual(perturbed.batches[2].videos, ['why_food_eat.less_star'])
-  assert.deepEqual(perturbed.metadata, { experiment: 'audit', condition: 'perturbed' })
+  assert.equal(perturbed.batches[0].replies[0].text, 'context-specific reply')
+  assert.deepEqual(perturbed.batches[1].videos, ['city_night'])
+  assert.equal(perturbed.metadata.experiment, 'audit')
+  assert.equal(perturbed.metadata.condition, 'perturbed')
 })
 
-test('returns the selected base unchanged when no perturbation id is set', () => {
-  const trajectory = resolveLayeredTrajectory({
-    baseDocument: baseDatabase,
-    perturbationDocument: perturbationDatabase,
-    baseTrajectoryId: 'baseline',
-    perturbationTrajectoryId: '',
-  })
-  assert.equal(trajectory.source, 'base')
-  assert.deepEqual(trajectory.batches, baseDatabase.trajectories.baseline.batches.map((batch) => ({
-    ...batch,
-    replies: batch.replies || [],
-  })))
+test('single trajectory documents reject collection files and filename mismatches', () => {
+  assert.throws(() => selectTrajectory({ trajectories: {} }), /不能包含 trajectories 集合/)
+  assert.throws(() => normalizeBaseTrajectoryFile(baseDocument, 'other'), /目录名不一致/)
+  assert.throws(
+    () => normalizePerturbationTrajectoryFile({ ...perturbationDocument, extends: 'other' }, {
+      baseId: 'baseline',
+      expectedId: 'higher-social-proof',
+    }),
+    /必须指向所在目录的 base/,
+  )
+  assert.throws(
+    () => normalizePerturbationTrajectoryFile({ id: 'base', extends: 'baseline', patches: [] }, {
+      baseId: 'baseline',
+      expectedId: 'base',
+    }),
+    /保留名称/,
+  )
+})
+
+test('trajectory directories contain one base folder and one file per variant', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bili-audit-trajectories-'))
+  try {
+    const baseline = join(directory, 'baseline')
+    mkdirSync(baseline, { recursive: true })
+    writeJson(join(baseline, 'base.json'), baseDocument)
+    writeJson(join(baseline, 'higher-social-proof.json'), perturbationDocument)
+
+    const catalog = listTrajectoryCatalog(directory)
+    assert.deepEqual(catalog.map((entry) => entry.baseId), ['baseline'])
+    assert.deepEqual(catalog[0].perturbationIds, ['higher-social-proof'])
+
+    const selected = loadTrajectorySelection({
+      directory,
+      baseTrajectoryId: 'baseline',
+      perturbationTrajectoryId: 'higher-social-proof',
+    })
+    assert.equal(selected.trajectory.id, 'higher-social-proof')
+    assert.equal(selected.trajectory.batches.length, 3)
+    assert.equal(selected.baseFile, join(baseline, 'base.json'))
+    assert.equal(selected.perturbationFile, join(baseline, 'higher-social-proof.json'))
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('fingerprints are stable across object key order but change with final content', () => {
@@ -175,16 +173,17 @@ test('fingerprints are stable across object key order but change with final cont
     batches: [{ metadata: { b: 2, a: 1 }, videos: ['why_food_eat.less_star'], id: 'batch' }],
   }
   const perturbed = resolveLayeredTrajectory({
-    baseDocument: baseDatabase,
-    perturbationDocument: perturbationDatabase,
-    perturbationTrajectoryId: 'higher_social_proof',
+    baseDocument,
+    perturbationDocument,
+    baseTrajectoryId: 'baseline',
+    perturbationTrajectoryId: 'higher-social-proof',
   })
-  assert.equal(trajectoryFingerprint(first), trajectoryFingerprint(reordered))
-  assert.notEqual(trajectoryFingerprint(selectTrajectory(baseDatabase)), trajectoryFingerprint(perturbed))
+  assert.equal(trajectoryFingerprint(selectTrajectory(first)), trajectoryFingerprint(selectTrajectory(reordered)))
+  assert.notEqual(trajectoryFingerprint(selectTrajectory(baseDocument)), trajectoryFingerprint(perturbed))
 })
 
 test('selection is limited to a returned batch and accepts an explicit empty choice', () => {
-  const trajectory = selectTrajectory(baseDatabase)
+  const trajectory = selectTrajectory(baseDocument)
   assert.throws(
     () => validateBatchSelection(library, trajectory, 'turn-1', ['why_food_eat.less_star'], { maxBatchIndex: 0 }),
     /尚未.*返回/,
@@ -204,7 +203,7 @@ test('selection is limited to a returned batch and accepts an explicit empty cho
 })
 
 test('selection rejects unknown, duplicate, and malformed video ids', () => {
-  const trajectory = selectTrajectory(baseDatabase)
+  const trajectory = selectTrajectory(baseDocument)
   assert.throws(() => validateBatchSelection(library, trajectory, 'missing', []), /找不到批次/)
   assert.throws(
     () => validateBatchSelection(library, trajectory, 'turn-1', ['why_food_eat.more_fan'], { maxBatchIndex: 1 }),

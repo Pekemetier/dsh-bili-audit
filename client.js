@@ -1,9 +1,9 @@
 /**
- * Settings page for the local layered recommendation-selection audit.
+ * Settings page for the local recommendation-selection audit.
  *
- * Four JSON databases are edited independently: videos with sparse
- * perturbation patches, reusable replies, base trajectories, and sparse
- * perturbation trajectories. The page never talks to Bilibili or an LLM.
+ * Videos and trajectories are edited one file at a time. Replies live inline
+ * in trajectory batches because they depend on the complete context. The page
+ * never talks to Bilibili or an LLM.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-bili-audit',
@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
 [data-ba-select],[data-ba-input],[data-ba-textarea]{box-sizing:border-box;width:100%;border-radius:8px;font:inherit;
   color:inherit;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);}
 [data-ba-select],[data-ba-input]{height:32px;padding:5px 9px;font-size:12px;}
-[data-ba-textarea]{padding:9px;min-height:250px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+[data-ba-textarea]{padding:9px;min-height:280px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:11px;line-height:17px;resize:vertical;}
 [data-ba-select]:focus,[data-ba-input]:focus,[data-ba-textarea]:focus{outline:none;border-color:var(--dsw-alias-brand-primary);}
 [data-ba-btn]{height:30px;padding:0 12px;border-radius:8px;font:inherit;font-size:12px;cursor:pointer;
@@ -85,37 +85,75 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function trajectoryQuery(baseId, perturbationId = '') {
+      const query = new URLSearchParams({ baseId, mode: perturbationId ? 'perturbation' : 'base' })
+      if (perturbationId) query.set('id', perturbationId)
+      return `/trajectory?${query.toString()}`
+    }
+
     function Panel() {
       const [status, setStatus] = useState(null)
-      const [libraryText, setLibraryText] = useState('')
-      const [replyText, setReplyText] = useState('')
-      const [baseText, setBaseText] = useState('')
-      const [perturbationText, setPerturbationText] = useState('')
       const [toolMode, setToolMode] = useState('recommend-only')
       const [baseId, setBaseId] = useState('')
       const [perturbationId, setPerturbationId] = useState('')
+      const [videoId, setVideoId] = useState('')
+      const [videoText, setVideoText] = useState('')
+      const [baseText, setBaseText] = useState('')
+      const [perturbationText, setPerturbationText] = useState('')
       const [busy, setBusy] = useState('')
       const [notice, setNotice] = useState(null)
 
-      const load = useCallback(async (clearNotice = true) => {
-        setBusy('load')
-        try {
-          const data = await getJson('/status')
-          setStatus(data)
-          setLibraryText(pretty(data.libraryDocument))
-          setReplyText(pretty(data.replyLibraryDocument))
-          setBaseText(pretty(data.baseTrajectoryDocument))
-          setPerturbationText(pretty(data.perturbationTrajectoryDocument))
-          setToolMode(data.config?.toolMode || 'recommend-only')
-          setBaseId(data.config?.baseTrajectoryId || '')
-          setPerturbationId(data.config?.perturbationTrajectoryId || '')
-          if (clearNotice) setNotice(null)
-        } catch (error) {
-          setNotice({ type: 'error', text: error instanceof Error ? error.message : String(error) })
-        } finally {
-          setBusy('')
-        }
+      const loadEditors = useCallback(async (data, selection = {}) => {
+        const videoFiles = Array.isArray(data?.videoFiles) ? data.videoFiles : []
+        const catalog = Array.isArray(data?.trajectoryCatalog) ? data.trajectoryCatalog : []
+        const wantedBase = selection.baseId ?? data?.config?.baseTrajectoryId ?? ''
+        const selectedBase = catalog.find((entry) => entry.baseId === wantedBase) || catalog[0] || null
+        const wantedPerturbation =
+          selection.perturbationId !== undefined
+            ? selection.perturbationId
+            : data?.config?.perturbationTrajectoryId || ''
+        const selectedPerturbation =
+          selectedBase?.perturbationIds?.includes(wantedPerturbation) ? wantedPerturbation : ''
+        const wantedVideo = selection.videoId ?? videoFiles[0]?.id ?? ''
+        const selectedVideo = videoFiles.some((item) => item.id === wantedVideo) ? wantedVideo : videoFiles[0]?.id || ''
+
+        const requests = []
+        requests.push(selectedVideo ? getJson(`/video?id=${encodeURIComponent(selectedVideo)}`) : null)
+        requests.push(selectedBase ? getJson(trajectoryQuery(selectedBase.baseId)) : null)
+        requests.push(
+          selectedBase && selectedPerturbation
+            ? getJson(trajectoryQuery(selectedBase.baseId, selectedPerturbation))
+            : null,
+        )
+        const [videoDocument, baseDocument, perturbationDocument] = await Promise.all(
+          requests.map((request) => request || Promise.resolve(null)),
+        )
+
+        setBaseId(selectedBase?.baseId || '')
+        setPerturbationId(selectedPerturbation)
+        setVideoId(selectedVideo)
+        setVideoText(videoDocument?.document ? pretty(videoDocument.document) : '')
+        setBaseText(baseDocument?.document ? pretty(baseDocument.document) : '')
+        setPerturbationText(perturbationDocument?.document ? pretty(perturbationDocument.document) : '')
       }, [])
+
+      const load = useCallback(
+        async (clearNotice = true, selection = {}) => {
+          setBusy('load')
+          try {
+            const data = await getJson('/status')
+            setStatus(data)
+            setToolMode(data.config?.toolMode || 'recommend-only')
+            await loadEditors(data, selection)
+            if (clearNotice) setNotice(null)
+          } catch (error) {
+            setNotice({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+          } finally {
+            setBusy('')
+          }
+        },
+        [loadEditors],
+      )
 
       useEffect(() => {
         void load()
@@ -125,13 +163,14 @@ window.__ModuleLoader__.load({
         setBusy(name)
         try {
           await task()
-          await load(false)
         } catch (error) {
           setNotice({ type: 'error', text: error instanceof Error ? error.message : String(error) })
         } finally {
           setBusy('')
         }
       }
+
+      const reloadEditors = () => load(false, { videoId, baseId, perturbationId })
 
       const saveConfig = () =>
         run('config', async () => {
@@ -140,52 +179,91 @@ window.__ModuleLoader__.load({
             baseTrajectoryId: baseId.trim(),
             perturbationTrajectoryId: perturbationId.trim(),
           })
-          setNotice({ type: 'ok', text: '工具模式与 base/扰动轨迹选择已保存。' })
+          setNotice({ type: 'ok', text: '工具模式与活动轨迹已保存。' })
+          await load(false, { videoId, baseId, perturbationId })
         })
 
-      const saveDatabase = (name, endpoint, text, label, successText) =>
-        run(name, async () => {
-          const document = parseDocument(text, label)
-          await postJson(endpoint, { document })
-          setNotice({ type: 'ok', text: successText })
+      const chooseVideo = (id) =>
+        run('video-load', async () => {
+          const data = await getJson(`/video?id=${encodeURIComponent(id)}`)
+          setVideoId(id)
+          setVideoText(pretty(data.document))
+          setNotice({ type: 'ok', text: `已读取视频文件 ${id}.json。` })
         })
 
-      const saveLibrary = () =>
-        saveDatabase('library', '/video-library', libraryText, '视频库', '视频（含扰动）数据库已保存。')
+      const chooseBase = (id) =>
+        run('base-load', async () => {
+          const data = await getJson(trajectoryQuery(id))
+          setBaseId(id)
+          setPerturbationId('')
+          setPerturbationText('')
+          setBaseText(pretty(data.document))
+          setNotice({ type: 'ok', text: `已读取 base 轨迹 ${id}/base.json。` })
+        })
 
-      const saveReplies = () =>
-        saveDatabase('replies', '/reply-library', replyText, '回复数据库', '回复数据库已保存。')
+      const choosePerturbation = (id) =>
+        run('perturbation-load', async () => {
+          if (!id) {
+            setPerturbationId('')
+            setPerturbationText('')
+            setNotice({ type: 'ok', text: '当前编辑时不应用扰动轨迹。' })
+            return
+          }
+          const data = await getJson(trajectoryQuery(baseId, id))
+          setPerturbationId(id)
+          setPerturbationText(pretty(data.document))
+          setNotice({ type: 'ok', text: `已读取扰动轨迹 ${baseId}/${id}.json。` })
+        })
+
+      const saveVideo = () =>
+        run('video-save', async () => {
+          if (!videoId) throw new Error('请先选择视频文件')
+          const document = parseDocument(videoText, '视频文件')
+          await postJson('/video', { id: videoId, document })
+          setNotice({ type: 'ok', text: `视频 ${videoId}.json 已保存。` })
+          await reloadEditors()
+        })
 
       const saveBase = () =>
-        saveDatabase(
-          'base',
-          '/base-trajectories',
-          baseText,
-          'base 轨迹数据库',
-          'base 轨迹数据库已保存；轨迹内容变化后会从新 fingerprint 的游标开始。',
-        )
+        run('base-save', async () => {
+          if (!baseId) throw new Error('请先选择 base 轨迹')
+          const document = parseDocument(baseText, 'base 轨迹')
+          await postJson('/base-trajectory', { baseId, document })
+          setNotice({ type: 'ok', text: `base 轨迹 ${baseId}/base.json 已保存。` })
+          await reloadEditors()
+        })
 
       const savePerturbation = () =>
-        saveDatabase(
-          'perturbation',
-          '/perturbation-trajectories',
-          perturbationText,
-          '扰动轨迹数据库',
-          '扰动轨迹数据库已保存；未写出的批次与字段会继承 base。',
-        )
+        run('perturbation-save', async () => {
+          if (!baseId || !perturbationId) throw new Error('请先选择扰动轨迹')
+          const document = parseDocument(perturbationText, '扰动轨迹')
+          await postJson('/perturbation-trajectory', { baseId, id: perturbationId, document })
+          setNotice({
+            type: 'ok',
+            text: `扰动轨迹 ${baseId}/${perturbationId}.json 已保存；未写出的内容继承 base。`,
+          })
+          await reloadEditors()
+        })
 
       const reset = (scope) =>
         run(`reset-${scope}`, async () => {
           await postJson('/reset', { scope })
-          setNotice({ type: 'ok', text: scope === 'all' ? '所有轨迹游标与审计记录已重置。' : '当前轨迹游标与审计记录已重置。' })
+          setNotice({
+            type: 'ok',
+            text: scope === 'all' ? '所有轨迹游标与审计记录已重置。' : '当前活动轨迹游标与审计记录已重置。',
+          })
+          await reloadEditors()
         })
 
       const trajectory = status?.status?.trajectory
       const library = status?.status?.library
       const events = status?.status?.recentEvents || []
       const selections = status?.status?.recentSelections || []
-      const baseIds = status?.baseTrajectoryIds || []
-      const perturbationIds = status?.perturbationTrajectoryIds || []
+      const videoFiles = status?.videoFiles || []
+      const catalog = status?.trajectoryCatalog || []
+      const baseEntry = catalog.find((entry) => entry.baseId === baseId)
+      const perturbationIds = baseEntry?.perturbationIds || []
+      const files = status?.status?.files || status?.files || {}
 
       return h(
         'div',
@@ -194,9 +272,15 @@ window.__ModuleLoader__.load({
           'div',
           null,
           h('div', { 'data-ba-title': '' }, '推荐流选择审计', h('span', { 'data-ba-badge': '' }, `v${status?.version || '?'}`)),
-          h('div', { 'data-ba-sub': '' }, '运行时只回放本地数据。模型凭据由 DSH provider 管理，不写入这里；采集脚本只在显式运行且限速时访问 B站。'),
+          h(
+            'div',
+            { 'data-ba-sub': '' },
+            '运行时只回放本地文件。LLM API Key 由 DSH provider/凭据配置管理，不写入本插件；采集脚本仅在显式运行且限速时访问 B站。',
+          ),
         ),
-        notice ? h('div', { 'data-ba-msg': '', 'data-ba-error': notice.type === 'error' ? '' : undefined }, notice.text) : null,
+        notice
+          ? h('div', { 'data-ba-msg': '', 'data-ba-error': notice.type === 'error' ? '' : undefined }, notice.text)
+          : null,
         h(
           'div',
           { 'data-ba-card': '' },
@@ -205,20 +289,24 @@ window.__ModuleLoader__.load({
             { 'data-ba-stats': '' },
             h('div', { 'data-ba-stat': '' }, h('b', null, trajectory?.cursor ?? 0), h('span', null, '已返回批次')),
             h('div', { 'data-ba-stat': '' }, h('b', null, trajectory?.remaining ?? 0), h('span', null, '剩余批次')),
-            h('div', { 'data-ba-stat': '' }, h('b', null, library?.videos ?? 0), h('span', null, '展开后视频条目')),
-            h('div', { 'data-ba-stat': '' }, h('b', null, library?.replies ?? 0), h('span', null, '回复条目')),
+            h('div', { 'data-ba-stat': '' }, h('b', null, library?.baseVideos ?? 0), h('span', null, '视频文件')),
+            h('div', { 'data-ba-stat': '' }, h('b', null, library?.perturbations ?? 0), h('span', null, '视频扰动')),
           ),
-          h('div', { 'data-ba-note': '' }, `当前解析轨迹：${trajectory?.name || trajectory?.id || '—'} · ${trajectory?.source || '—'} · fingerprint ${trajectory?.fingerprint || '—'}`),
+          h(
+            'div',
+            { 'data-ba-note': '' },
+            `当前轨迹：${trajectory?.name || trajectory?.id || '—'} · ${trajectory?.source || '—'} · ${trajectory?.batches ?? 0} 批 · ${trajectory?.inlineReplies ?? 0} 条内联回复`,
+          ),
           h('div', { 'data-ba-note': '' }, status?.prompt || ''),
-          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `视频库：${status?.files?.library || ''}`),
-          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `回复库：${status?.files?.replyLibrary || ''}`),
-          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `base 轨迹：${status?.files?.baseTrajectory || ''}`),
-          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `扰动轨迹：${status?.files?.perturbationTrajectory || ''}`),
+          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `视频目录：${files.videoDirectory || ''}`),
+          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `轨迹目录：${files.trajectoryDirectory || ''}`),
+          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `base 文件：${files.baseTrajectory || ''}`),
+          h('div', { 'data-ba-note': '', 'data-ba-code': '' }, `扰动文件：${files.perturbationTrajectory || '未应用'}`),
         ),
         h(
           'div',
           { 'data-ba-card': '' },
-          h('div', { 'data-ba-label': '' }, '工具暴露模式'),
+          h('div', { 'data-ba-label': '' }, '工具暴露模式与活动轨迹'),
           h(
             'div',
             { 'data-ba-grid': '' },
@@ -236,34 +324,33 @@ window.__ModuleLoader__.load({
             h(
               'label',
               { 'data-ba-field': '' },
-              h('span', { 'data-ba-note': '' }, 'base 轨迹 id（留空则用 activeTrajectory 或第一个）'),
-              h('input', {
-                'data-ba-input': '',
-                list: 'ba-base-ids',
-                value: baseId,
-                placeholder: baseIds[0] || 'baseline',
-                onChange: (event) => setBaseId(event.target.value),
-              }),
-              h('datalist', { id: 'ba-base-ids' }, baseIds.map((id) => h('option', { key: id, value: id }))),
+              h('span', { 'data-ba-note': '' }, '活动 base 轨迹'),
+              h(
+                'select',
+                { 'data-ba-select': '', value: baseId, onChange: (event) => chooseBase(event.target.value) },
+                catalog.map((entry) => h('option', { key: entry.baseId, value: entry.baseId }, entry.baseId)),
+              ),
             ),
             h(
               'label',
               { 'data-ba-field': '' },
-              h('span', { 'data-ba-note': '' }, '扰动轨迹 id（留空则不应用扰动）'),
-              h('input', {
-                'data-ba-input': '',
-                list: 'ba-perturbation-ids',
-                value: perturbationId,
-                placeholder: perturbationIds[0] || 'higher-social-proof',
-                onChange: (event) => setPerturbationId(event.target.value),
-              }),
-              h('datalist', { id: 'ba-perturbation-ids' }, perturbationIds.map((id) => h('option', { key: id, value: id }))),
+              h('span', { 'data-ba-note': '' }, '活动扰动轨迹（空表示只用 base）'),
+              h(
+                'select',
+                {
+                  'data-ba-select': '',
+                  value: perturbationId,
+                  onChange: (event) => choosePerturbation(event.target.value),
+                },
+                h('option', { value: '' }, '不使用扰动'),
+                perturbationIds.map((id) => h('option', { key: id, value: id }, id)),
+              ),
             ),
           ),
           h(
             'div',
             { 'data-ba-row': '' },
-            h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: saveConfig }, '保存模式与轨迹'),
+            h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: saveConfig }, '保存模式与活动轨迹'),
             h('button', { 'data-ba-btn': '', disabled: Boolean(busy), onClick: () => reset('active') }, '重置当前轨迹游标'),
             h('button', { 'data-ba-btn': '', 'data-danger': '', disabled: Boolean(busy), onClick: () => reset('all') }, '重置全部'),
             h('button', { 'data-ba-btn': '', disabled: Boolean(busy), onClick: () => load() }, '重新读取'),
@@ -273,54 +360,92 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { 'data-ba-card': '' },
-          h('div', { 'data-ba-label': '' }, '1 · 视频（含扰动）数据库'),
-          h('div', { 'data-ba-note': '' }, '基础视频保存共享的 recommendation/watch；perturbations 仅写增量，展开 id 为 <基础id>.<扰动代号>。'),
+          h('div', { 'data-ba-label': '' }, '1 · 视频（含扰动）文件'),
+          h('div', { 'data-ba-note': '' }, `每个基础视频独立为 videos/<id>.json，文件内 perturbations 只保存增量。当前共 ${videoFiles.length} 个文件。`),
+          h(
+            'label',
+            { 'data-ba-field': '' },
+            h('span', { 'data-ba-note': '' }, '选择视频文件'),
+            h(
+              'select',
+              { 'data-ba-select': '', value: videoId, onChange: (event) => chooseVideo(event.target.value) },
+              videoFiles.map((entry) => h('option', { key: entry.id, value: entry.id }, `${entry.id}.json`)),
+            ),
+          ),
           h('textarea', {
             'data-ba-textarea': '',
-            value: libraryText,
+            value: videoText,
             spellCheck: false,
-            onChange: (event) => setLibraryText(event.target.value),
+            onChange: (event) => setVideoText(event.target.value),
           }),
-          h('div', { 'data-ba-row': '' }, h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: saveLibrary }, '保存视频库')),
+          h(
+            'div',
+            { 'data-ba-row': '' },
+            h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy) || !videoId, onClick: saveVideo }, '保存当前视频文件'),
+            h('button', { 'data-ba-btn': '', disabled: Boolean(busy) || !videoId, onClick: () => chooseVideo(videoId) }, '重新读取'),
+          ),
         ),
         h(
           'div',
           { 'data-ba-card': '' },
-          h('div', { 'data-ba-label': '' }, '2 · 回复数据库'),
-          h('div', { 'data-ba-note': '' }, '保存可复用的非模型回复/上下文。轨迹批次只写 reply id，需要局部修改时再写覆盖字段。'),
-          h('textarea', {
-            'data-ba-textarea': '',
-            value: replyText,
-            spellCheck: false,
-            onChange: (event) => setReplyText(event.target.value),
-          }),
-          h('div', { 'data-ba-row': '' }, h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: saveReplies }, '保存回复库')),
-        ),
-        h(
-          'div',
-          { 'data-ba-card': '' },
-          h('div', { 'data-ba-label': '' }, '3 · base 轨迹数据库'),
-          h('div', { 'data-ba-note': '' }, 'batches 顺序就是固定未来流。视频和回复尽量只写数据库 id；局部覆盖直接写在对应条目中。'),
+          h('div', { 'data-ba-label': '' }, '2 · base 轨迹文件'),
+          h('div', { 'data-ba-note': '' }, `base 轨迹独占 trajectories/<baseId>/base.json。批次中的 replies 直接内联。当前 base：${baseId || '—'}。`),
           h('textarea', {
             'data-ba-textarea': '',
             value: baseText,
             spellCheck: false,
             onChange: (event) => setBaseText(event.target.value),
           }),
-          h('div', { 'data-ba-row': '' }, h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: saveBase }, '保存 base 轨迹')),
+          h(
+            'div',
+            { 'data-ba-row': '' },
+            h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy) || !baseId, onClick: saveBase }, '保存当前 base 轨迹'),
+            h('button', { 'data-ba-btn': '', disabled: Boolean(busy) || !baseId, onClick: () => chooseBase(baseId) }, '重新读取'),
+          ),
         ),
         h(
           'div',
           { 'data-ba-card': '' },
-          h('div', { 'data-ba-label': '' }, '4 · 扰动轨迹数据库'),
-          h('div', { 'data-ba-note': '' }, '使用 extends + patches/removeBatches/addBatches 只记录变化；对象深合并，数组整体替换。'),
-          h('textarea', {
-            'data-ba-textarea': '',
-            value: perturbationText,
-            spellCheck: false,
-            onChange: (event) => setPerturbationText(event.target.value),
-          }),
-          h('div', { 'data-ba-row': '' }, h('button', { 'data-ba-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: savePerturbation }, '保存扰动轨迹')),
+          h('div', { 'data-ba-label': '' }, '3 · 扰动轨迹文件'),
+          h('div', { 'data-ba-note': '' }, '扰动轨迹与 base 位于同一子文件夹，使用 extends + patches/removeBatches/addBatches 只记录变化；对象深合并，数组整体替换。'),
+          perturbationId
+            ? h(
+                'div',
+                { 'data-ba-note': '', 'data-ba-code': '' },
+                `trajectories/${baseId}/${perturbationId}.json`,
+              )
+            : h('div', { 'data-ba-note': '' }, '选择一个扰动文件后可单独编辑。'),
+          perturbationId
+            ? h('textarea', {
+                'data-ba-textarea': '',
+                value: perturbationText,
+                spellCheck: false,
+                onChange: (event) => setPerturbationText(event.target.value),
+              })
+            : null,
+          h(
+            'div',
+            { 'data-ba-row': '' },
+            h(
+              'button',
+              {
+                'data-ba-btn': '',
+                'data-primary': '',
+                disabled: Boolean(busy) || !baseId || !perturbationId,
+                onClick: savePerturbation,
+              },
+              '保存当前扰动轨迹',
+            ),
+            h(
+              'button',
+              {
+                'data-ba-btn': '',
+                disabled: Boolean(busy) || !baseId || !perturbationId,
+                onClick: () => choosePerturbation(perturbationId),
+              },
+              '重新读取',
+            ),
+          ),
         ),
         h(
           'div',

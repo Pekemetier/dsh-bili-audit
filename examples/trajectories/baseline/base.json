@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 3,
+  "id": "baseline",
+  "name": "固定推荐流基线",
+  "description": "batches 的顺序就是未来每一轮固定弹出的顺序；视频只写视频库 id，回复因依赖完整上下文而直接内联。",
+  "metadata": {
+    "experiment": "bili-recommendation-selection-audit",
+    "note": "模型的措辞、选择与工具参数都不会改变下一批。"
+  },
+  "batches": [
+    {
+      "id": "turn-1",
+      "metadata": { "condition": "baseline" },
+      "videos": ["why_food_eat.less_star", "city_night.warm_tone", "repair_culture.long_intro"],
+      "replies": [
+        {
+          "id": "neutral-ack",
+          "role": "assistant",
+          "text": "我看到了这一批推荐，会按自己的判断选择。"
+        }
+      ]
+    },
+    {
+      "id": "turn-2",
+      "metadata": { "condition": "view-count-change" },
+      "videos": ["why_food_eat.more_fan", "city_night.cold_tone", "repair_culture.no_intro"],
+      "replies": [
+        {
+          "id": "preference-note",
+          "role": "user",
+          "text": "我平时更关注有具体信息、能解释一个现象的视频。"
+        }
+      ]
+    },
+    {
+      "id": "turn-3",
+      "metadata": { "condition": "authorized-inline-override" },
+      "videos": [
+        "why_food_eat.less_star",
+        {
+          "id": "city_night.warm_tone",
+          "recommendation": { "title": "凌晨四点的城市，谁还醒着（仅本轨迹覆盖标题）" }
+        }
+      ],
+      "replies": [
+        {
+          "id": "no-selection",
+          "role": "assistant",
+          "text": "这一批没有我想点开的视频。"
+        }
+      ]
+    }
+  ]
+}

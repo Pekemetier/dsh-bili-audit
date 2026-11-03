@@ -3,10 +3,10 @@
  *
  * There is deliberately no Bilibili client in the runtime host. The optional
  * crawler under scripts/ is the only network-enabled code and is never imported
- * here. The host replays fixed local layered trajectories and exposes only the
- * tools needed to inspect and select videos.
+ * here. The host reads one file per video and one file per trajectory, then
+ * exposes only the tools needed to inspect and select videos.
  */
-import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { cpSync, existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,16 +19,23 @@ import {
   saveState,
   loadState,
 } from './lib/store.js'
-import { normalizeVideoLibrary } from './lib/video-library.js'
-import { normalizeReplyLibrary } from './lib/reply-library.js'
-import { listTrajectoryIds, resolveLayeredTrajectory, selectTrajectory } from './lib/trajectory.js'
+import { listVideoFiles, normalizeVideoFile, videoFilePath } from './lib/video-library.js'
 import {
+  BASE_TRAJECTORY_FILE,
+  listTrajectoryCatalog,
+  normalizeBaseTrajectoryFile,
+  normalizePerturbationTrajectoryFile,
+  trajectoryFilePath,
+} from './lib/trajectory.js'
+import {
+  ensureDir,
   errorMessage,
   makeLogger,
   readJsonStrict,
   readTail,
   resolveHomeDir,
   sameOriginOk,
+  safeFileId,
   writeJson,
 } from './lib/util.js'
 
@@ -38,7 +45,7 @@ export const inject = ['webServer', 'tools']
 const here = dirname(fileURLToPath(import.meta.url))
 const API_PREFIX = '/api/bili-audit'
 const MAX_BODY = 8_000_000
-let VERSION = '2.1.0'
+let VERSION = '2.2.0'
 try {
   VERSION = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8')).version || VERSION
 } catch {
@@ -93,49 +100,42 @@ function readBody(req) {
   })
 }
 
-const DEFAULT_FILES = [
-  { defaultPath: 'video-library.json', configKey: 'libraryPath', target: 'library', example: 'video-library.json' },
-  { defaultPath: 'reply-library.json', configKey: 'replyLibraryPath', target: 'replyLibrary', example: 'reply-library.json' },
-  { defaultPath: 'base-trajectories.json', configKey: 'baseTrajectoryPath', target: 'baseTrajectories', example: 'base-trajectories.json' },
-  { defaultPath: 'perturbation-trajectories.json', configKey: 'perturbationTrajectoryPath', target: 'perturbationTrajectories', example: 'perturbation-trajectories.json' },
+const DEFAULT_DIRECTORIES = [
+  { configKey: 'videoDirectory', defaultPath: 'videos', target: 'videos' },
+  { configKey: 'trajectoryDirectory', defaultPath: 'trajectories', target: 'trajectories' },
 ]
 
-function ensureDefaultFiles(home, config) {
+function ensureDefaultData(home, config) {
   const destination = paths(home)
-  for (const item of DEFAULT_FILES) {
-    if (config[item.configKey] === item.defaultPath && !existsSync(destination[item.target])) {
-      copyFileSync(join(here, 'examples', item.example), destination[item.target])
-    }
+  for (const item of DEFAULT_DIRECTORIES) {
+    if (config[item.configKey] !== item.defaultPath || existsSync(destination[item.target])) continue
+    const source = join(here, 'examples', item.target)
+    if (existsSync(source)) cpSync(source, destination[item.target], { recursive: true })
   }
 }
 
-function readDocument(file) {
-  return readJsonStrict(file)
-}
-
-function validateDocumentBody(body) {
+function requestDocument(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('请求体必须是 JSON 对象')
-  return body.document ?? body
-}
-
-function isTrajectoryDatabase(document) {
-  return Boolean(document) && typeof document === 'object' && !Array.isArray(document) &&
-    Boolean(document.trajectories) && typeof document.trajectories === 'object' &&
-    !Array.isArray(document.trajectories)
-}
-
-function safeTrajectoryId(document, requestedId) {
-  if (isTrajectoryDatabase(document) && Object.keys(document.trajectories).length === 0) {
-    throw new Error('轨迹数据库为空')
+  const document = body.document ?? body
+  if (!document || typeof document !== 'object' || Array.isArray(document)) {
+    throw new Error('document 必须是 JSON 对象')
   }
-  return selectTrajectory(document, requestedId).id
+  return document
+}
+
+function requestId(body, key, label) {
+  return safeFileId(body?.[key], label)
+}
+
+function publicFileList(entries) {
+  return entries.map((entry) => ({ id: entry.id, file: entry.file }))
 }
 
 export function apply(ctx) {
   const home = resolveHomeDir(ctx)
   const log = makeLogger(paths(home).log)
   let config = loadConfig(home)
-  ensureDefaultFiles(home, config)
+  ensureDefaultData(home, config)
   saveConfig(home, config)
   saveState(home, loadState(home))
 
@@ -249,7 +249,7 @@ export function apply(ctx) {
   const statusTool = {
     name: 'bili_fav_status',
     description:
-      '只读查看本地轨迹游标、剩余批次数、视频库/回复库数量、最近固定批次事件与选择记录。仅在 toolMode=all 时暴露。',
+      '只读查看本地轨迹游标、剩余批次数、视频数量、最近固定批次事件与选择记录。仅在 toolMode=all 时暴露。',
     parameters: { type: 'object', properties: {} },
     timeoutMs: 15_000,
     execute: safeExecute(async () => {
@@ -266,7 +266,7 @@ export function apply(ctx) {
     if (disposed) return
     disposeTools()
     config = loadConfig(home)
-    ensureDefaultFiles(home, config)
+    ensureDefaultData(home, config)
     const definitions = [recommendTool]
     if (config.toolMode === 'all') definitions.push(previewTool, runTool, statusTool)
     for (const definition of definitions) {
@@ -310,21 +310,9 @@ export function apply(ctx) {
     return false
   }
 
-  function trajectoryIdsFor(document) {
-    if (!isTrajectoryDatabase(document)) return []
-    return Object.keys(document.trajectories)
-  }
-
-  function selectPerturbationId(document, requestedId) {
-    const requested = typeof requestedId === 'string' ? requestedId.trim() : ''
-    const ids = trajectoryIdsFor(document)
-    if (ids.length === 0) return ''
-    if (!requested) return ''
-    return ids.includes(requested) ? requested : ids.includes(document.activeTrajectory) ? document.activeTrajectory : ids[0]
-  }
-
   function commitDocument(file, document, validate) {
-    const previous = existsSync(file) ? readDocument(file) : null
+    ensureDir(dirname(file))
+    const previous = existsSync(file) ? readJsonStrict(file) : null
     writeJson(file, document)
     try {
       validate()
@@ -355,12 +343,10 @@ export function apply(ctx) {
     try {
       if (req.method === 'GET' && path === `${API_PREFIX}/status`) {
         const currentConfig = loadConfig(home)
-        ensureDefaultFiles(home, currentConfig)
+        ensureDefaultData(home, currentConfig)
         const current = engine()
-        const libraryDocument = readDocument(current.files.library)
-        const replyLibraryDocument = readDocument(current.files.replyLibrary)
-        const baseTrajectoryDocument = readDocument(current.files.baseTrajectory)
-        const perturbationTrajectoryDocument = readDocument(current.files.perturbationTrajectory)
+        const videoFiles = listVideoFiles(current.files.videoDirectory)
+        const trajectoryCatalog = listTrajectoryCatalog(current.files.trajectoryDirectory)
         sendJson(res, 200, {
           ok: true,
           version: VERSION,
@@ -372,13 +358,9 @@ export function apply(ctx) {
             currentConfig.toolMode === 'recommend-only'
               ? '当前只启用 bili_fav_recommend，无需选择工具；直接调用它读取下一批，再用 action=select 记录选择。'
               : '当前启用多个审计工具；先选择符合当前任务步骤的工具。',
-          baseTrajectoryIds: trajectoryIdsFor(baseTrajectoryDocument),
-          perturbationTrajectoryIds: trajectoryIdsFor(perturbationTrajectoryDocument),
           status: current.status(),
-          libraryDocument,
-          replyLibraryDocument,
-          baseTrajectoryDocument,
-          perturbationTrajectoryDocument,
+          videoFiles: publicFileList(videoFiles),
+          trajectoryCatalog,
           logTail: readTail(paths(home).log, 2000),
         })
         return
@@ -391,9 +373,7 @@ export function apply(ctx) {
           return
         }
         const candidate = sanitizeConfig({ ...loadConfig(home), ...body })
-        ensureDefaultFiles(home, candidate)
-        // Validate all four layers before persisting a mode or id that would
-        // leave the replay environment unusable.
+        ensureDefaultData(home, candidate)
         loadAuditInputs({ home, config: candidate })
         config = saveConfig(home, candidate)
         syncTools()
@@ -401,84 +381,104 @@ export function apply(ctx) {
         return
       }
 
-      if (req.method === 'POST' && path === `${API_PREFIX}/video-library`) {
-        const body = await readBody(req)
-        if (!body) {
-          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
-          return
-        }
-        const document = validateDocumentBody(body)
-        normalizeVideoLibrary(document)
+      if (req.method === 'GET' && path === `${API_PREFIX}/videos`) {
         const currentConfig = loadConfig(home)
-        const file = resolveDataPath(home, currentConfig.libraryPath)
-        commitDocument(file, document, () => loadAuditInputs({ home, config: currentConfig }))
-        sendJson(res, 200, { ok: true, file })
+        const directory = resolveDataPath(home, currentConfig.videoDirectory)
+        sendJson(res, 200, { ok: true, videos: publicFileList(listVideoFiles(directory)) })
         return
       }
 
-      if (req.method === 'POST' && path === `${API_PREFIX}/reply-library`) {
-        const body = await readBody(req)
-        if (!body) {
-          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
-          return
-        }
-        const document = validateDocumentBody(body)
-        normalizeReplyLibrary(document)
+      if (req.method === 'GET' && path === `${API_PREFIX}/video`) {
         const currentConfig = loadConfig(home)
-        const file = resolveDataPath(home, currentConfig.replyLibraryPath)
-        commitDocument(file, document, () => loadAuditInputs({ home, config: currentConfig }))
-        sendJson(res, 200, { ok: true, file })
+        const id = safeFileId(url.searchParams.get('id'), '视频 id')
+        const file = videoFilePath(resolveDataPath(home, currentConfig.videoDirectory), id)
+        if (!existsSync(file)) throw new Error(`视频文件不存在：${id}`)
+        const checked = normalizeVideoFile(readJsonStrict(file), id)
+        sendJson(res, 200, { ok: true, id, file, document: checked.document })
         return
       }
 
-      if (req.method === 'POST' && path === `${API_PREFIX}/base-trajectories`) {
+      if (req.method === 'POST' && path === `${API_PREFIX}/video`) {
         const body = await readBody(req)
         if (!body) {
           sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
           return
         }
-        const document = validateDocumentBody(body)
+        const id = requestId(body, 'id', '视频 id')
+        const checked = normalizeVideoFile(requestDocument(body), id)
         const currentConfig = loadConfig(home)
-        const oldId = currentConfig.baseTrajectoryId
-        const database = isTrajectoryDatabase(document)
-        const currentIdMissing = database && oldId && !Object.hasOwn(document.trajectories, oldId)
-        const selectedId = currentIdMissing
-          ? selectTrajectory(document).id
-          : safeTrajectoryId(document, oldId)
-        const candidate = sanitizeConfig({ ...currentConfig, baseTrajectoryId: selectedId })
-        const file = resolveDataPath(home, currentConfig.baseTrajectoryPath)
-        commitDocument(file, document, () => loadAuditInputs({ home, config: candidate }))
-        config = saveConfig(home, candidate)
-        sendJson(res, 200, {
-          ok: true,
-          file,
-          baseTrajectoryId: selectedId,
-          switchedFromMissingId: currentIdMissing ? oldId : '',
+        const file = videoFilePath(resolveDataPath(home, currentConfig.videoDirectory), id)
+        commitDocument(file, checked.document, () => loadAuditInputs({ home, config: currentConfig }))
+        sendJson(res, 200, { ok: true, id, file })
+        return
+      }
+
+      if (req.method === 'GET' && path === `${API_PREFIX}/trajectories`) {
+        const currentConfig = loadConfig(home)
+        const catalog = listTrajectoryCatalog(resolveDataPath(home, currentConfig.trajectoryDirectory))
+        sendJson(res, 200, { ok: true, trajectories: catalog })
+        return
+      }
+
+      if (req.method === 'GET' && path === `${API_PREFIX}/trajectory`) {
+        const currentConfig = loadConfig(home)
+        const directory = resolveDataPath(home, currentConfig.trajectoryDirectory)
+        const baseId = safeFileId(url.searchParams.get('baseId'), 'base 轨迹 id')
+        const mode = url.searchParams.get('mode') || 'base'
+        if (mode === 'base') {
+          const file = trajectoryFilePath(directory, baseId, BASE_TRAJECTORY_FILE)
+          if (!existsSync(file)) throw new Error(`base 轨迹文件不存在：${baseId}/base.json`)
+          const checked = normalizeBaseTrajectoryFile(readJsonStrict(file), baseId)
+          sendJson(res, 200, { ok: true, mode, baseId, file, document: checked.document })
+          return
+        }
+        if (mode !== 'perturbation') throw new Error(`不支持的轨迹模式：${mode}`)
+        const id = safeFileId(url.searchParams.get('id'), '扰动轨迹 id')
+        const file = trajectoryFilePath(directory, baseId, id)
+        if (!existsSync(file)) throw new Error(`扰动轨迹文件不存在：${baseId}/${id}.json`)
+        const checked = normalizePerturbationTrajectoryFile(readJsonStrict(file), {
+          baseId,
+          expectedId: id,
         })
+        sendJson(res, 200, { ok: true, mode, baseId, id, file, document: checked.document })
         return
       }
 
-      if (req.method === 'POST' && path === `${API_PREFIX}/perturbation-trajectories`) {
+      if (req.method === 'POST' && path === `${API_PREFIX}/base-trajectory`) {
         const body = await readBody(req)
         if (!body) {
           sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
           return
         }
-        const document = validateDocumentBody(body)
+        const baseId = requestId(body, 'baseId', 'base 轨迹 id')
+        const checked = normalizeBaseTrajectoryFile(requestDocument(body), baseId)
         const currentConfig = loadConfig(home)
-        const oldId = currentConfig.perturbationTrajectoryId
-        const selectedId = selectPerturbationId(document, oldId)
-        const currentIdMissing = Boolean(oldId && oldId !== selectedId)
-        const candidate = sanitizeConfig({ ...currentConfig, perturbationTrajectoryId: selectedId })
-        const file = resolveDataPath(home, currentConfig.perturbationTrajectoryPath)
-        commitDocument(file, document, () => loadAuditInputs({ home, config: candidate }))
-        config = saveConfig(home, candidate)
-        sendJson(res, 200, {
-          ok: true,
-          file,
-          perturbationTrajectoryId: selectedId,
-          switchedFromMissingId: currentIdMissing ? oldId : '',
+        const directory = resolveDataPath(home, currentConfig.trajectoryDirectory)
+        const file = trajectoryFilePath(directory, baseId, BASE_TRAJECTORY_FILE)
+        commitDocument(file, checked.document, () => loadAuditInputs({ home, config: currentConfig }))
+        sendJson(res, 200, { ok: true, baseId, file })
+        return
+      }
+
+      if (req.method === 'POST' && path === `${API_PREFIX}/perturbation-trajectory`) {
+        const body = await readBody(req)
+        if (!body) {
+          sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+          return
+        }
+        const baseId = requestId(body, 'baseId', 'base 轨迹 id')
+        const id = requestId(body, 'id', '扰动轨迹 id')
+        const checked = normalizePerturbationTrajectoryFile(requestDocument(body), {
+          baseId,
+          expectedId: id,
         })
+        const currentConfig = loadConfig(home)
+        const directory = resolveDataPath(home, currentConfig.trajectoryDirectory)
+        const baseFile = trajectoryFilePath(directory, baseId, BASE_TRAJECTORY_FILE)
+        if (!existsSync(baseFile)) throw new Error(`base 轨迹文件不存在：${baseId}/base.json`)
+        const file = trajectoryFilePath(directory, baseId, id)
+        commitDocument(file, checked.document, () => loadAuditInputs({ home, config: currentConfig }))
+        sendJson(res, 200, { ok: true, baseId, id, file })
         return
       }
 

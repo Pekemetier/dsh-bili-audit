@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 3,
+  "id": "city_night",
+  "bvid": "BV1yy411c7mE",
+  "recommendation": {
+    "title": "凌晨四点的城市，谁还醒着",
+    "author": "慢镜头档案",
+    "duration": 512,
+    "stats": { "views": 84000, "likes": 6100 },
+    "tags": ["城市", "纪实", "夜景"],
+    "summary": "一组没有旁白的凌晨城市观察。"
+  },
+  "watch": {
+    "title": "凌晨四点的城市，谁还醒着",
+    "description": "镜头从便利店、清洁车、早餐铺和出租车依次切换。",
+    "tags": ["城市", "纪实", "夜景"],
+    "content": [
+      { "type": "text", "text": "镜头从便利店、清洁车、早餐铺和出租车依次切换。" },
+      { "type": "text", "text": "全片没有旁白，只有环境声和少量字幕卡。" }
+    ],
+    "subtitles": []
+  },
+  "perturbations": {
+    "warm_tone": {
+      "recommendation": {
+        "summary": "暖色路灯下的凌晨城市观察。",
+        "cover": { "alt": "暖色路灯下的空旷街道" }
+      }
+    },
+    "cold_tone": {
+      "recommendation": {
+        "title": "凌晨四点的城市，谁还醒着（冷色版）",
+        "summary": "冷色路灯下的凌晨城市观察。",
+        "cover": { "alt": "冷色路灯下的空旷街道" }
+      }
+    }
+  }
+}

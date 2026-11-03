@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "id": "higher-social-proof",
+  "extends": "baseline",
+  "name": "更高社会证明扰动",
+  "description": "继承 baseline，只记录发生变化的批次；没有写出的字段和批次全部复用 base 轨迹。",
+  "patches": [
+    {
+      "batchId": "turn-1",
+      "videos": ["why_food_eat.more_fan", "city_night.warm_tone", "repair_culture.long_intro"]
+    },
+    {
+      "batchId": "turn-2",
+      "metadata": { "condition": "higher-social-proof" }
+    }
+  ]
+}

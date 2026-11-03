@@ -3,16 +3,17 @@
  * Explicit, rate-limited Bilibili metadata collector.
  *
  * This is the only network-enabled product code. The DSH plugin never imports
- * it. It performs read-only requests, never logs in, and writes an agent-readable
- * video library whose perturbation slots intentionally start empty.
+ * it. It performs read-only requests, never logs in, and writes one
+ * agent-readable file per video. Perturbation slots intentionally start empty.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { writeJson } from '../lib/util.js'
+import { listVideoFiles, normalizeVideoFile, videoFilePath } from '../lib/video-library.js'
+import { readJsonStrict, writeJson } from '../lib/util.js'
 
 const API_BASE = 'https://api.bilibili.com'
 const UA =
@@ -188,6 +189,7 @@ export function buildVideoRecord({ feed, detail, tags = [], subtitle = null, cra
   if (description) content.push({ type: 'text', text: description })
   if (subtitle?.text && subtitleLines.length === 0) content.push({ type: 'text', text: text(subtitle.text) })
   return {
+    schemaVersion: 3,
     id,
     bvid,
     aid: number(detail?.aid || feed?.aid),
@@ -334,7 +336,7 @@ export async function crawlBilibili({
   sleepImpl = sleep,
   random = Math.random,
   timeoutMs = 20_000,
-  existingDocument = null,
+  existingRecords = [],
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new BiliCrawlError('当前环境没有可用的 fetch')
   const pageCount = Math.max(1, Math.min(50, Math.trunc(Number(pages) || 1)))
@@ -510,16 +512,14 @@ export async function crawlBilibili({
     }
   }
 
-  const existingVideos = existingDocument?.videos && typeof existingDocument.videos === 'object'
-    ? { ...existingDocument.videos }
-    : {}
-  const existingBvids = new Set(
-    Object.values(existingVideos)
-      .map((item) => text(item?.bvid).toLowerCase())
-      .filter(Boolean),
-  )
+  const existingBvids = new Set()
+  for (const item of Array.isArray(existingRecords) ? existingRecords : []) {
+    const bvid = text(item?.bvid).toLowerCase()
+    if (bvid) existingBvids.add(bvid)
+  }
   const records = []
   const seen = new Set()
+  let skipped = 0
   for (let page = 1; page <= pageCount && records.length < limit; page += 1) {
     logger.info?.(`读取推荐流第 ${page}/${pageCount} 页`)
     const items = await feed(page)
@@ -530,6 +530,7 @@ export async function crawlBilibili({
       seen.add(key)
       if (existingBvids.has(key)) {
         logger.info?.(`resume：跳过已有 ${item.bvid}`)
+        skipped += 1
         continue
       }
       const full = await detail(item.bvid)
@@ -540,24 +541,49 @@ export async function crawlBilibili({
     }
   }
 
-  const nowIso = new Date().toISOString()
-  const document = {
-    ...existingDocument,
-    schemaVersion: 2,
-    name: text(existingDocument?.name) || 'B站推荐流采集库',
-    description:
-      '由 scripts/crawl-bilibili.mjs 只读采集。recommendation 为推荐卡片信息，watch 为详情/标签/字幕等观看材料；perturbations 初始为空，等待后续人工定义。',
-    source: {
-      platform: 'bilibili',
-      collector: 'crawl-bilibili.mjs',
-      collectedAt: nowIso,
-    },
-    videos: {
-      ...existingVideos,
-      ...Object.fromEntries(records.map((record) => [record.id, record])),
-    },
+  return { records, added: records.length, skipped }
+}
+
+/** Read every per-video file so --resume can match BVIDs and preserve edits. */
+export function readExistingVideos(directory) {
+  if (!existsSync(directory)) return []
+  if (!statSync(directory).isDirectory()) {
+    throw new BiliCrawlError(`输出路径必须是视频文件夹：${directory}`)
   }
-  return { document, added: records.length, skipped: existingBvids.size }
+  const records = []
+  const seen = new Set()
+  for (const entry of listVideoFiles(directory)) {
+    const checked = normalizeVideoFile(readJsonStrict(entry.file), entry.id)
+    const bvid = text(checked.document.bvid).toLowerCase()
+    if (!bvid) throw new BiliCrawlError(`已有视频文件缺少 bvid：${entry.file}`)
+    if (seen.has(bvid)) throw new BiliCrawlError(`视频目录中 BVID 重复：${checked.document.bvid}`)
+    seen.add(bvid)
+    records.push(checked.document)
+  }
+  return records
+}
+
+/**
+ * Write generated records without touching unrelated manual files. Collisions
+ * with a different BVID are never overwritten, even under --force.
+ */
+export function writeCrawledVideos(directory, records, { force = false } = {}) {
+  mkdirSync(directory, { recursive: true })
+  const written = []
+  for (const record of records) {
+    const file = videoFilePath(directory, record?.id)
+    if (existsSync(file)) {
+      const existing = normalizeVideoFile(readJsonStrict(file), record.id).document
+      const sameVideo = text(existing.bvid).toLowerCase() === text(record.bvid).toLowerCase()
+      if (!sameVideo) {
+        throw new BiliCrawlError(`文件名冲突：${file} 已属于另一个 BVID；拒绝覆盖`)
+      }
+      if (!force) throw new BiliCrawlError(`视频文件已存在：${file}；使用 --resume 跳过或 --force 覆盖`)
+    }
+    writeJson(file, record)
+    written.push(file)
+  }
+  return written
 }
 
 function usage() {
@@ -571,9 +597,9 @@ Options:
   --jitter-ms <n>             随机额外间隔上限（默认 500）
   --with-subtitles            尝试采集字幕（可能要求登录 Cookie）
   --subtitle-max-chars <n>    每视频字幕最大字符数（默认 12000）
-  --output <file>             输出视频库 JSON（默认 bilibili-video-library.json）
-  --resume                    合并已有输出并跳过已采集 BVID
-  --force                     覆盖已存在的输出，不使用 --resume
+  --output <dir>              输出视频文件夹，每个视频一个 JSON（默认 videos）
+  --resume                    扫描已有视频文件，跳过已知 BVID 并保留人工扰动
+  --force                     允许覆盖同名且 BVID 相同的生成文件
   --cookie-file <file>        本地 Cookie 文本/JSON；也可用 BILI_COOKIE 环境变量
   --timeout-ms <n>            单请求超时（默认 20000）
   --help                      显示帮助
@@ -612,13 +638,17 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write(usage())
     return
   }
-  const output = resolve(values.output || 'bilibili-video-library.json')
-  if (existsSync(output) && !values.resume && !values.force) {
-    throw new BiliCrawlError(`输出文件已存在：${output}。使用 --resume 合并，或显式传 --force 覆盖。`)
+  if (values.resume && values.force) {
+    throw new BiliCrawlError('--resume 与 --force 不能同时使用')
   }
-  const existingDocument = values.resume && existsSync(output)
-    ? JSON.parse(readFileSync(output, 'utf8'))
-    : null
+  const output = resolve(values.output || 'videos')
+  if (existsSync(output) && !values.resume && !values.force) {
+    throw new BiliCrawlError(`输出文件夹已存在：${output}。使用 --resume 追加，或显式传 --force 覆盖生成文件。`)
+  }
+  if (existsSync(output) && !statSync(output).isDirectory()) {
+    throw new BiliCrawlError(`输出路径必须是视频文件夹：${output}`)
+  }
+  const existingRecords = values.resume ? readExistingVideos(output) : []
   const cookie = loadCookie({ cookieFile: values['cookie-file'] || '' })
   const result = await crawlBilibili({
     pages: Number(values.pages || 1),
@@ -630,13 +660,12 @@ export async function main(argv = process.argv.slice(2)) {
     subtitleMaxChars: Number(values['subtitle-max-chars'] || DEFAULT_SUBTITLE_MAX_CHARS),
     timeoutMs: Number(values['timeout-ms'] || 20_000),
     cookie,
-    existingDocument,
+    existingRecords,
   })
-  mkdirSync(dirname(output), { recursive: true })
-  writeJson(output, result.document)
+  writeCrawledVideos(output, result.records, { force: Boolean(values.force) })
   process.stdout.write(
-    `采集完成：新增 ${result.added} 个视频，输出 ${output}\n` +
-      `已有 BVID 跳过 ${result.skipped} 个；新增视频的 perturbations 初始为空，--resume 会保留已有扰动。\n`,
+    `采集完成：新增 ${result.added} 个视频文件，输出文件夹 ${output}\n` +
+      `推荐流中已有 BVID 跳过 ${result.skipped} 个；新增视频的 perturbations 初始为空，--resume 不会改动已有文件及其扰动。\n`,
   )
 }
 

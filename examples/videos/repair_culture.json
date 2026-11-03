@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 3,
+  "id": "repair_culture",
+  "bvid": "BV1zz411c7mF",
+  "recommendation": {
+    "title": "修好一台旧收音机，需要多少耐心",
+    "author": "桌面修理铺",
+    "duration": 1260,
+    "stats": { "views": 42000, "likes": 3800 },
+    "tags": ["手工", "修理", "数码"],
+    "summary": "从故障排查到重新发声的完整修理过程。"
+  },
+  "watch": {
+    "title": "修好一台旧收音机，需要多少耐心",
+    "description": "完整展示拆机、清洁、电路检查和组装试听。",
+    "tags": ["手工", "修理", "数码"],
+    "content": [
+      { "type": "text", "text": "前六分钟主要展示拆机、清洁和电路检查。" },
+      { "type": "text", "text": "第十二分钟找到电容故障，第二十分钟完成组装并试听。" }
+    ],
+    "subtitles": ["老设备最麻烦的往往不是坏了一个大零件，而是很多小接触点一起老化。"]
+  },
+  "perturbations": {
+    "long_intro": {
+      "recommendation": { "summary": "完整保留开场和拆机过程的修理视频。" }
+    },
+    "no_intro": {
+      "recommendation": {
+        "title": "直接开修：一台旧收音机的复活过程",
+        "summary": "去掉前六分钟开场，直接进入故障排查。"
+      },
+      "watch": {
+        "content": [
+          { "type": "text", "text": "视频从电路检查开始，省略了原版的开场和拆机闲聊。" },
+          { "type": "text", "text": "第十二分钟找到电容故障，第二十分钟完成组装并试听。" }
+        ]
+      }
+    }
+  }
+}

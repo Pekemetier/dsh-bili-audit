@@ -1,15 +1,22 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
+  listVideoFiles,
+  loadVideoLibrary,
   lookupVideo,
   mergeDeep,
+  normalizeVideoFile,
   normalizeVideoLibrary,
   resolveVideoEntry,
+  videoFilePath,
 } from '../lib/video-library.js'
+import { writeJson } from '../lib/util.js'
 
 const layeredLibrary = {
-  name: 'test library',
   videos: {
     why_food_eat: {
       recommendation: {
@@ -26,10 +33,7 @@ const layeredLibrary = {
           recommendation: { stats: { views: 3 } },
         },
         more_fan: {
-          recommendation: {
-            title: 'popular title',
-            tags: ['popular'],
-          },
+          recommendation: { title: 'popular title', tags: ['popular'] },
           watch: { subtitles: ['perturbed subtitle'] },
         },
       },
@@ -44,7 +48,7 @@ const layeredLibrary = {
 
 test('expands a base video and its sparse perturbation patches into mixed ids', () => {
   const library = normalizeVideoLibrary(layeredLibrary)
-  assert.equal(library.schemaVersion, 2)
+  assert.equal(library.schemaVersion, 3)
   assert.deepEqual(Object.keys(library.videos).sort(), [
     'city_night',
     'why_food_eat',
@@ -68,27 +72,48 @@ test('expands a base video and its sparse perturbation patches into mixed ids', 
   assert.equal(moreFan.watch.content[0].text, 'original watch text')
 })
 
-test('keeps legacy flat mixed ids working', () => {
-  const library = normalizeVideoLibrary({
-    videos: {
-      'repair_culture.no_intro': {
-        recommendation: { title: 'repair' },
-        watch: { subtitles: ['direct repair'] },
-      },
-    },
-  })
-  assert.equal(library.videos['repair_culture.no_intro'].id, 'repair_culture.no_intro')
+test('loads one video file per base video from a directory', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'bili-audit-videos-'))
+  try {
+    mkdirSync(directory, { recursive: true })
+    writeJson(join(directory, 'why_food_eat.json'), {
+      schemaVersion: 3,
+      id: 'why_food_eat',
+      ...layeredLibrary.videos.why_food_eat,
+    })
+    writeJson(join(directory, 'city_night.json'), {
+      schemaVersion: 3,
+      id: 'city_night',
+      ...layeredLibrary.videos.city_night,
+    })
+    const files = listVideoFiles(directory)
+    assert.deepEqual(files.map((entry) => entry.id), ['city_night', 'why_food_eat'])
+
+    const library = loadVideoLibrary(directory)
+    assert.equal(library.baseVideoCount, 2)
+    assert.equal(Object.keys(library.videos).length, 4)
+    assert.equal(library.videos['why_food_eat.more_fan'].recommendation.title, 'popular title')
+    assert.equal(library.sourceFiles.why_food_eat, join(directory, 'why_food_eat.json'))
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
-test('accepts array libraries and copies explicit ids', () => {
-  const library = normalizeVideoLibrary({
-    videos: [
-      { id: 'repair_culture.no_intro', recommendation: { title: 'repair' } },
-      { id: 'city_night.cold_tone', watch: { subtitles: ['cold'] } },
-    ],
-  })
-  assert.deepEqual(Object.keys(library.videos), ['repair_culture.no_intro', 'city_night.cold_tone'])
-  assert.deepEqual(library.videos['city_night.cold_tone'].watch, { subtitles: ['cold'] })
+test('single video files enforce a safe filename id and reject collections', () => {
+  const checked = normalizeVideoFile(
+    { schemaVersion: 3, id: 'repair_culture', recommendation: { title: 'repair' } },
+    'repair_culture',
+  )
+  assert.equal(checked.id, 'repair_culture')
+  assert.equal(checked.document.schemaVersion, 3)
+  assert.throws(
+    () => normalizeVideoFile({ id: 'other', recommendation: {} }, 'repair_culture'),
+    /文件名不一致/,
+  )
+  assert.throws(() => normalizeVideoFile({ videos: { repair: { recommendation: {} } } }), /不能包含 videos/)
+  assert.throws(() => videoFilePath('videos', 'CON'), /保留文件名/)
+  assert.throws(() => videoFilePath('videos', '../escape'), /不能用于文件名/)
+  assert.throws(() => videoFilePath('videos', 'bad/name'), /不能用于文件名/)
 })
 
 test('lookup rejects unknown and missing ids', () => {
@@ -138,11 +163,7 @@ test('invalid libraries fail with actionable errors', () => {
   assert.throws(() => normalizeVideoLibrary({ videos: {} }), /视频库为空/)
   assert.throws(() => normalizeVideoLibrary({ videos: [{ title: 'missing id' }] }), /缺少 id/)
   assert.throws(
-    () => normalizeVideoLibrary({ videos: [{ id: 'same' }, { id: 'same' }] }),
-    /重复/,
-  )
-  assert.throws(
-    () => normalizeVideoLibrary({ videos: { base: { perturbations: { nested: { perturbations: {} } } } } }),
-    /不允许再嵌套/,
+    () => normalizeVideoLibrary({ videos: [{ id: 'duplicate' }, { id: 'duplicate' }] }),
+    /id 重复/,
   )
 })

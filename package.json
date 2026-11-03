@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-audit",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "DSH 离线推荐流选择审计插件：从本地分层视频库与固定轨迹回放 B站推荐卡片和观看内容，只暴露选择视频所需工具；运行时零 B站请求，另附显式限速只读采集脚本。",
   "type": "module",
   "main": "index.js",
